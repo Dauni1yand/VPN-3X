@@ -63,10 +63,3 @@ async def health_check_nodes(ctx) -> None:
                 await client.aclose()
 
         await db.commit()
-
-
-async def probe_node_sni(ctx, node_id: str) -> None:
-    """Stub for the "auto-pick a working SNI" requirement (README, Главный
-    сервер п.1 / тг-бот п.4). Needs a real strategy (candidate SNI list +
-    TLS handshake probing) designed in Etap 1 -- not implemented yet."""
-    raise NotImplementedError("SNI probing is planned for Etap 1, see PLAN.md")
