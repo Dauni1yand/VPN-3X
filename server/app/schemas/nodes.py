@@ -16,6 +16,16 @@ class NodeCreate(BaseModel):
     country: str | None = None
 
 
+class NodeBootstrapRequest(BaseModel):
+    name: str
+    ip: str
+    country: str | None = None
+    ssh_user: str = "root"
+    ssh_port: int = 22
+    ssh_password: str | None = Field(default=None, repr=False)
+    ssh_private_key: str | None = Field(default=None, repr=False)
+
+
 class NodeCredentialsUpdate(BaseModel):
     panel_login: str | None = None
     panel_password: str | None = Field(default=None, repr=False)

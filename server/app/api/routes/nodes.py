@@ -7,7 +7,8 @@ from app.core.security import encrypt_secret
 from app.db.models import Inbound, Node, NodeStatus
 from app.db.session import get_db
 from app.schemas.inbounds import InboundOut
-from app.schemas.nodes import NodeCreate, NodeCredentialsUpdate, NodeOut
+from app.schemas.nodes import NodeBootstrapRequest, NodeCreate, NodeCredentialsUpdate, NodeOut
+from app.services.node_bootstrap import NodeBootstrapError, bootstrap_node
 from app.services.node_provisioner import provision_default_inbound, rotate_inbound_sni
 
 router = APIRouter(prefix="/nodes", tags=["nodes"], dependencies=[Depends(require_internal_api_key)])
@@ -60,6 +61,45 @@ async def delete_node(node_id: str, db: AsyncSession = Depends(get_db)) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node not found")
     await db.delete(node)
     await db.commit()
+
+
+@router.post("/bootstrap", response_model=NodeOut, status_code=status.HTTP_201_CREATED)
+async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession = Depends(get_db)) -> Node:
+    """Goes all the way from a bare Ubuntu VPS to a serving VLESS node in
+    one call: SSHes in, installs 3x-ui, sets our own panel credentials,
+    then provisions the REALITY inbound on it (README: "настраивать с нуля
+    ноды"). SSH credentials are only used transiently here -- never
+    persisted, unlike the panel credentials this generates."""
+
+    try:
+        panel_login, panel_password, panel_port = await bootstrap_node(
+            ssh_host=payload.ip,
+            ssh_user=payload.ssh_user,
+            ssh_port=payload.ssh_port,
+            ssh_password=payload.ssh_password,
+            ssh_private_key=payload.ssh_private_key,
+        )
+    except NodeBootstrapError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    node = Node(
+        name=payload.name,
+        ip=payload.ip,
+        panel_base_url=f"http://{payload.ip}:{panel_port}",
+        panel_login=panel_login,
+        panel_password_encrypted=encrypt_secret(panel_password),
+        country=payload.country.upper() if payload.country else None,
+    )
+    db.add(node)
+    await db.flush()  # assigns node.id, needed by provision_default_inbound
+
+    inbound = await provision_default_inbound(node)
+    db.add(inbound)
+    node.status = NodeStatus.active
+
+    await db.commit()
+    await db.refresh(node)
+    return node
 
 
 @router.post("/{node_id}/inbound", response_model=InboundOut, status_code=status.HTTP_201_CREATED)

@@ -51,6 +51,23 @@ class ServerAPIClient:
         resp = await self._http.delete(f"/nodes/{node_id}")
         resp.raise_for_status()
 
+    async def bootstrap_node(
+        self, name: str, ip: str, ssh_password: str, country: str | None, ssh_user: str = "root"
+    ) -> dict:
+        resp = await self._http.post(
+            "/nodes/bootstrap",
+            json={
+                "name": name,
+                "ip": ip,
+                "ssh_user": ssh_user,
+                "ssh_password": ssh_password,
+                "country": country,
+            },
+            timeout=300,  # install.sh + apt update genuinely takes a while
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def provision_inbound(self, node_id: str) -> dict:
         resp = await self._http.post(f"/nodes/{node_id}/inbound")
         resp.raise_for_status()

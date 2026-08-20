@@ -52,6 +52,32 @@ async def cmd_delete_node(message: Message) -> None:
     await message.answer("Нода удалена.")
 
 
+@router.message(Command("bootstrap"))
+async def cmd_bootstrap(message: Message) -> None:
+    # Usage: /bootstrap <name> <ip> <ssh_root_password> [country]
+    # Goes all the way from a bare VPS to a serving node: installs 3x-ui
+    # over SSH, sets our own panel credentials, creates the REALITY inbound.
+    parts = (message.text or "").split(maxsplit=4)[1:]
+    # Delete the command message first regardless of outcome -- it contains
+    # the SSH root password in plaintext, and a private Telegram chat lets a
+    # bot delete the user's own message (unlike groups, no admin rights
+    # needed), so don't leave it sitting in the chat history.
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001 -- best-effort scrub, never block on it
+        pass
+
+    if len(parts) not in (3, 4):
+        await message.answer("Использование: /bootstrap <name> <ip> <ssh_root_password> [country]")
+        return
+
+    name, ip, ssh_password, *rest = parts
+    country = rest[0] if rest else None
+    status_msg = await message.answer("Устанавливаю 3x-ui и настраиваю ноду, это займёт пару минут...")
+    node = await server_api.bootstrap_node(name, ip, ssh_password, country)
+    await status_msg.edit_text(f"Нода готова и раздаёт VPN: {node['id']} ({node['status']})")
+
+
 @router.message(Command("provision"))
 async def cmd_provision(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=1)
