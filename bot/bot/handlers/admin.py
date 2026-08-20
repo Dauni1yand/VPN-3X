@@ -105,6 +105,22 @@ async def cmd_rotate_sni(message: Message) -> None:
     )
 
 
+@router.message(Command("issueconfig"))
+async def cmd_issue_admin_config(message: Message) -> None:
+    # Usage: /issueconfig <telegram_id> <hours> <node_id> -- unlike a regular
+    # user, the admin explicitly picks which node to issue on (README:
+    # "выдача админских VPN-конфигов с выбором сервера"), e.g. to test one.
+    parts = (message.text or "").split(maxsplit=3)[1:]
+    if len(parts) != 3 or not parts[0].lstrip("-").isdigit() or not parts[1].isdigit():
+        await message.answer("Использование: /issueconfig <telegram_id> <hours> <node_id>")
+        return
+    telegram_id, hours, node_id = parts
+    result = await server_api.create_admin_client(
+        int(telegram_id), int(hours) * 3600, node_id, message.from_user.id
+    )
+    await message.answer(f"Конфиг выдан:\n`{result['vless_uri']}`", parse_mode="Markdown")
+
+
 @router.message(Command("migrate"))
 async def cmd_migrate_client(message: Message) -> None:
     # Usage: /migrate <client_id> [target_node_id] -- moves a client to

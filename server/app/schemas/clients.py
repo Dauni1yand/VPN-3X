@@ -14,6 +14,16 @@ class ClientCreate(BaseModel):
     client_latencies: dict[str, float] | None = None
 
 
+class AdminClientCreate(BaseModel):
+    user_telegram_id: int
+    duration_seconds: int
+    admin_telegram_id: int
+    # Unlike ClientCreate: explicit, since only the admin path is allowed to
+    # bypass the balancer and pick a node directly (README: regular users
+    # never see/choose a server).
+    target_node_id: str
+
+
 class ClientMigrate(BaseModel):
     admin_telegram_id: int
     # If omitted, the balancer picks the least-loaded active node other than

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decrypt_secret
-from app.db.models import Client, ClientStatus, Inbound, User
+from app.db.models import Client, ClientStatus, Inbound, Node, NodeStatus, User
 from app.schemas.clients import ClientOut
 from app.services.node_balancer import pick_node_for_client
 from app.services.threexui_client import ThreeXUIClient
@@ -20,6 +20,7 @@ async def issue_client(
     *,
     client_country: str | None = None,
     client_latencies: dict[str, float] | None = None,
+    target_node_id: str | None = None,
 ) -> ClientOut:
     """Grants `telegram_id` a VLESS client valid for `duration_seconds`,
     whether that time was earned by watching an ad or by a paid subscription.
@@ -27,7 +28,11 @@ async def issue_client(
 
     `client_country` / `client_latencies` feed the node balancer's
     connection-quality estimate -- see node_balancer.py for how they're used
-    and what happens when neither is available."""
+    and what happens when neither is available.
+
+    `target_node_id` bypasses the balancer entirely -- regular users never
+    get to pick their node (README requirement), but the admin-issued-config
+    path does explicitly choose one, e.g. to test a specific node."""
 
     user = (
         await db.execute(select(User).where(User.telegram_id == telegram_id))
@@ -37,7 +42,12 @@ async def issue_client(
         db.add(user)
         await db.flush()
 
-    node = await pick_node_for_client(db, client_country=client_country, client_latencies=client_latencies)
+    if target_node_id is not None:
+        node = await db.get(Node, target_node_id)
+        if node is None or node.status != NodeStatus.active:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target node not found or not active")
+    else:
+        node = await pick_node_for_client(db, client_country=client_country, client_latencies=client_latencies)
     if node is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="no active node available")
 

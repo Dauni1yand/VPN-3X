@@ -83,6 +83,21 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def create_admin_client(
+        self, user_telegram_id: int, duration_seconds: int, target_node_id: str, admin_telegram_id: int
+    ) -> dict:
+        resp = await self._http.post(
+            "/clients/admin",
+            json={
+                "user_telegram_id": user_telegram_id,
+                "duration_seconds": duration_seconds,
+                "target_node_id": target_node_id,
+                "admin_telegram_id": admin_telegram_id,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def migrate_client(self, client_id: str, admin_telegram_id: int, target_node_id: str | None = None) -> dict:
         resp = await self._http.post(
             f"/clients/{client_id}/migrate",

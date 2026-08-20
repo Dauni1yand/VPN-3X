@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_internal_api_key
 from app.db.models import Client, Inbound, Node
 from app.db.session import get_db
-from app.schemas.clients import ClientCreate, ClientMigrate, ClientOut
+from app.schemas.clients import AdminClientCreate, ClientCreate, ClientMigrate, ClientOut
 from app.services.audit import log_admin_action
 from app.services.client_issuer import issue_client
 from app.services.client_migrator import migrate_client
@@ -28,6 +28,26 @@ async def create_client(
         client_country=cf_ip_country,
         client_latencies=payload.client_latencies,
     )
+
+
+@router.post("/admin", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
+async def create_admin_client(payload: AdminClientCreate, db: AsyncSession = Depends(get_db)) -> ClientOut:
+    """Admin-issued config on an explicitly chosen node (README: unlike
+    regular users, the admin can pick a server -- e.g. to test a specific
+    node). Bypasses the balancer entirely via issue_client's target_node_id."""
+
+    client = await issue_client(
+        db, payload.user_telegram_id, payload.duration_seconds, target_node_id=payload.target_node_id
+    )
+    log_admin_action(
+        db,
+        admin_telegram_id=payload.admin_telegram_id,
+        action="admin_issue_client",
+        target=client.id,
+        details=payload.target_node_id,
+    )
+    await db.commit()
+    return client
 
 
 @router.post("/{client_id}/migrate", response_model=ClientOut)
