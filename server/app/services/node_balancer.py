@@ -73,8 +73,12 @@ async def pick_node_for_client(
     *,
     client_country: str | None = None,
     client_latencies: dict[str, float] | None = None,
+    exclude_node_id: str | None = None,
 ) -> Node | None:
-    nodes = (await db.execute(select(Node).where(Node.status == NodeStatus.active))).scalars().all()
+    stmt = select(Node).where(Node.status == NodeStatus.active)
+    if exclude_node_id is not None:
+        stmt = stmt.where(Node.id != exclude_node_id)
+    nodes = (await db.execute(stmt)).scalars().all()
     if not nodes:
         return None
 

@@ -105,6 +105,22 @@ async def cmd_rotate_sni(message: Message) -> None:
     )
 
 
+@router.message(Command("migrate"))
+async def cmd_migrate_client(message: Message) -> None:
+    # Usage: /migrate <client_id> [target_node_id] -- moves a client to
+    # another node without cutting its remaining time short (README:
+    # "переброс пользователя с одной ноды на другую"). Without
+    # target_node_id, the balancer picks the least-loaded other active node.
+    parts = (message.text or "").split(maxsplit=2)[1:]
+    if len(parts) not in (1, 2):
+        await message.answer("Использование: /migrate <client_id> [target_node_id]")
+        return
+    client_id, *rest = parts
+    target_node_id = rest[0] if rest else None
+    result = await server_api.migrate_client(client_id, message.from_user.id, target_node_id)
+    await message.answer(f"Клиент перенесён. Новый конфиг:\n`{result['vless_uri']}`", parse_mode="Markdown")
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message) -> None:
     values = await server_api.list_settings()

@@ -83,6 +83,14 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def migrate_client(self, client_id: str, admin_telegram_id: int, target_node_id: str | None = None) -> dict:
+        resp = await self._http.post(
+            f"/clients/{client_id}/migrate",
+            json={"admin_telegram_id": admin_telegram_id, "target_node_id": target_node_id},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_setting(self, key: str) -> str:
         resp = await self._http.get(f"/settings/{key}")
         resp.raise_for_status()

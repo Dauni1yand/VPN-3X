@@ -14,6 +14,13 @@ class ClientCreate(BaseModel):
     client_latencies: dict[str, float] | None = None
 
 
+class ClientMigrate(BaseModel):
+    admin_telegram_id: int
+    # If omitted, the balancer picks the least-loaded active node other than
+    # the client's current one.
+    target_node_id: str | None = None
+
+
 class ClientOut(BaseModel):
     id: str
     status: ClientStatus
