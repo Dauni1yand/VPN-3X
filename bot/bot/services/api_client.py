@@ -24,7 +24,15 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def add_node(self, name: str, ip: str, panel_base_url: str, panel_login: str, panel_password: str) -> dict:
+    async def add_node(
+        self,
+        name: str,
+        ip: str,
+        panel_base_url: str,
+        panel_login: str,
+        panel_password: str,
+        country: str | None = None,
+    ) -> dict:
         resp = await self._http.post(
             "/nodes",
             json={
@@ -33,6 +41,7 @@ class ServerAPIClient:
                 "panel_base_url": panel_base_url,
                 "panel_login": panel_login,
                 "panel_password": panel_password,
+                "country": country,
             },
         )
         resp.raise_for_status()

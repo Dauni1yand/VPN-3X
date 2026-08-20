@@ -19,6 +19,7 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)) -
         panel_base_url=payload.panel_base_url,
         panel_login=payload.panel_login,
         panel_password_encrypted=encrypt_secret(payload.panel_password),
+        country=payload.country.upper() if payload.country else None,
     )
     db.add(node)
     await db.commit()

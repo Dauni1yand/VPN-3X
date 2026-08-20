@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,11 @@ DEFAULT_SUBSCRIPTION_DURATION_SECONDS = 30 * 24 * 60 * 60
 
 
 @router.post("/ad-view", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
-async def grant_ad_view(payload: AdViewGrant, db: AsyncSession = Depends(get_db)) -> ClientOut:
+async def grant_ad_view(
+    payload: AdViewGrant,
+    db: AsyncSession = Depends(get_db),
+    cf_ip_country: str | None = Header(default=None, alias="CF-IPCountry"),
+) -> ClientOut:
     existing = (
         await db.execute(
             select(AdView).where(AdView.provider_impression_id == payload.provider_impression_id)
@@ -29,7 +33,13 @@ async def grant_ad_view(payload: AdViewGrant, db: AsyncSession = Depends(get_db)
 
     duration = AD_DURATIONS_SECONDS[payload.ad_type.value]
 
-    client = await issue_client(db, payload.user_telegram_id, duration)
+    client = await issue_client(
+        db,
+        payload.user_telegram_id,
+        duration,
+        client_country=cf_ip_country,
+        client_latencies=payload.client_latencies,
+    )
 
     user = (
         await db.execute(select(User).where(User.telegram_id == payload.user_telegram_id))
@@ -50,7 +60,12 @@ async def grant_ad_view(payload: AdViewGrant, db: AsyncSession = Depends(get_db)
 async def confirm_payment(payload: PaymentConfirm, db: AsyncSession = Depends(get_db)) -> ClientOut:
     """Called by the Telegram bot once a CryptoBot invoice is paid. Idempotent
     on `provider_invoice_id` so a retried bot call (or a duplicate CryptoBot
-    webhook) never issues a second client for the same payment."""
+    webhook) never issues a second client for the same payment.
+
+    No CF-IPCountry here on purpose: this call comes from the bot's own
+    container, not the end user's device, so that header would describe the
+    bot's network, not the user's. Only explicit `client_latencies` (if the
+    bot ever forwards some from the app) is a valid signal for this path."""
 
     existing = (
         await db.execute(select(Payment).where(Payment.provider_invoice_id == payload.provider_invoice_id))
@@ -66,7 +81,12 @@ async def confirm_payment(payload: PaymentConfirm, db: AsyncSession = Depends(ge
         db.add(user)
         await db.flush()
 
-    client = await issue_client(db, payload.user_telegram_id, DEFAULT_SUBSCRIPTION_DURATION_SECONDS)
+    client = await issue_client(
+        db,
+        payload.user_telegram_id,
+        DEFAULT_SUBSCRIPTION_DURATION_SECONDS,
+        client_latencies=payload.client_latencies,
+    )
 
     if existing is None:
         db.add(

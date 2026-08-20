@@ -26,16 +26,19 @@ async def cmd_list_nodes(message: Message) -> None:
 
 @router.message(Command("addnode"))
 async def cmd_add_node(message: Message) -> None:
-    # Usage: /addnode <name> <ip> <panel_base_url> <login> <password>
-    parts = (message.text or "").split(maxsplit=5)[1:]
-    if len(parts) != 5:
+    # Usage: /addnode <name> <ip> <panel_base_url> <login> <password> [country]
+    # country is an ISO-3166 alpha-2 code (e.g. NL) used by the balancer as a
+    # coarse latency proxy -- see node_balancer.py.
+    parts = (message.text or "").split(maxsplit=6)[1:]
+    if len(parts) not in (5, 6):
         await message.answer(
-            "Использование: /addnode <name> <ip> <panel_base_url> <login> <password>"
+            "Использование: /addnode <name> <ip> <panel_base_url> <login> <password> [country]"
         )
         return
 
-    name, ip, panel_base_url, login, password = parts
-    node = await server_api.add_node(name, ip, panel_base_url, login, password)
+    name, ip, panel_base_url, login, password, *rest = parts
+    country = rest[0] if rest else None
+    node = await server_api.add_node(name, ip, panel_base_url, login, password, country)
     await message.answer(f"Нода добавлена: {node['id']}")
 
 

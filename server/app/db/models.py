@@ -72,6 +72,10 @@ class Node(Base):
     panel_login: Mapped[str] = mapped_column(String(255))
     panel_password_encrypted: Mapped[str] = mapped_column(Text)
     sni: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # ISO-3166 alpha-2 (e.g. "NL", "DE") set by the admin when the node is
+    # added -- used as a coarse proxy for client<->node latency, see
+    # node_balancer.py.
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
     status: Mapped[NodeStatus] = mapped_column(
         Enum(NodeStatus, name="node_status"), default=NodeStatus.provisioning
     )
