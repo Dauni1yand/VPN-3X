@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import uuid
 
-from app.core.security import decrypt_secret
 from app.db.models import Client, Inbound, Node
-from app.services.threexui_client import ThreeXUIClient
+from app.services.threexui_client import get_pooled_client
 
 
 async def migrate_client(
@@ -23,33 +22,22 @@ async def migrate_client(
     new_uuid = str(uuid.uuid4())
     new_email = f"{client.email.rsplit('-', 1)[0]}-{new_uuid[:8]}"
 
-    target_threexui = ThreeXUIClient(
-        base_url=target_node.panel_base_url,
-        login=target_node.panel_login,
-        password=decrypt_secret(target_node.panel_password_encrypted),
+    target_threexui = get_pooled_client(target_node)
+    await target_threexui.add_client(
+        inbound_id=target_inbound.remote_inbound_id,
+        client_settings={
+            "clients": [
+                {
+                    "id": new_uuid,
+                    "email": new_email,
+                    "flow": "xtls-rprx-vision",
+                    "expiryTime": int(client.expires_at.timestamp() * 1000),
+                }
+            ]
+        },
     )
-    try:
-        await target_threexui.add_client(
-            inbound_id=target_inbound.remote_inbound_id,
-            client_settings={
-                "clients": [
-                    {
-                        "id": new_uuid,
-                        "email": new_email,
-                        "flow": "xtls-rprx-vision",
-                        "expiryTime": int(client.expires_at.timestamp() * 1000),
-                    }
-                ]
-            },
-        )
-    finally:
-        await target_threexui.aclose()
 
-    old_threexui = ThreeXUIClient(
-        base_url=old_node.panel_base_url,
-        login=old_node.panel_login,
-        password=decrypt_secret(old_node.panel_password_encrypted),
-    )
+    old_threexui = get_pooled_client(old_node)
     try:
         await old_threexui.delete_client(old_inbound.remote_inbound_id, client.remote_client_uuid)
     except Exception:  # noqa: BLE001 -- best-effort cleanup; the new client is already
@@ -57,8 +45,6 @@ async def migrate_client(
         # node we're migrating away from (often because it's unhealthy) must
         # not fail the migration itself.
         pass
-    finally:
-        await old_threexui.aclose()
 
     client.inbound_id = target_inbound.id
     client.remote_client_uuid = new_uuid

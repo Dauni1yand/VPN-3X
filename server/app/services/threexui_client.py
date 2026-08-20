@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import httpx
 
+from app.core.security import decrypt_secret
+
 
 class ThreeXUIAuthError(Exception):
     pass
@@ -92,3 +94,29 @@ class ThreeXUIClient:
         """Live online status, used by the health-check worker."""
         resp = await self._request("POST", "/panel/api/inbounds/onlines")
         return resp.json().get("obj", [])
+
+
+# node.id -> (credential fingerprint, client). Per PLAN.md section 4: "не
+# токен ноды" -- login/password with a session cookie, reused across calls
+# rather than re-logging in every time (the previous per-call
+# construct-then-aclose pattern meant e.g. the health-check worker
+# re-authenticated to every node every single minute). Keyed on a
+# fingerprint of the node's current credentials/URL, not just node.id, so a
+# password rotation or URL change transparently gets a fresh client instead
+# of reusing a stale, now-wrong one.
+_client_cache: dict[str, tuple[str, "ThreeXUIClient"]] = {}
+
+
+def get_pooled_client(node) -> "ThreeXUIClient":
+    fingerprint = f"{node.panel_base_url}|{node.panel_login}|{node.panel_password_encrypted}"
+    cached = _client_cache.get(node.id)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+
+    client = ThreeXUIClient(
+        base_url=node.panel_base_url,
+        login=node.panel_login,
+        password=decrypt_secret(node.panel_password_encrypted),
+    )
+    _client_cache[node.id] = (fingerprint, client)
+    return client

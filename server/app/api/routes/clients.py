@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_internal_api_key
-from app.db.models import Client, Inbound, Node
+from app.db.models import Client, Inbound, Node, NodeStatus
 from app.db.session import get_db
 from app.schemas.clients import AdminClientCreate, ClientCreate, ClientMigrate, ClientOut
 from app.services.audit import log_admin_action
@@ -33,13 +33,15 @@ async def create_client(
         limit=ISSUE_CLIENT_RATE_LIMIT,
         window_seconds=ISSUE_CLIENT_RATE_WINDOW_SECONDS,
     )
-    return await issue_client(
+    client = await issue_client(
         db,
         payload.user_telegram_id,
         payload.duration_seconds,
         client_country=cf_ip_country,
         client_latencies=payload.client_latencies,
     )
+    await db.commit()
+    return client
 
 
 @router.post("/admin", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
@@ -80,8 +82,8 @@ async def migrate_client_route(
 
     if payload.target_node_id is not None:
         target_node = await db.get(Node, payload.target_node_id)
-        if target_node is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="target node not found")
+        if target_node is None or target_node.status != NodeStatus.active:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="target node not found or not active")
     else:
         target_node = await pick_node_for_client(db, exclude_node_id=old_node.id)
         if target_node is None:

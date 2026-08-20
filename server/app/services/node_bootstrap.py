@@ -21,11 +21,13 @@ import secrets
 
 import asyncssh
 
-# Pin instead of always grabbing "latest" -- see PLAN.md risk: 3x-ui's API
-# has changed under us before (v3.6.0 started requiring a session instead of
-# a token). TODO(Etap 0 R&D): confirm this is still the recommended/latest
-# stable tag before first real deploy.
-THREEXUI_VERSION = "v2.6.3"
+# Pinned to v3.6.0 specifically because threexui_client.py's whole
+# login/session-cookie flow (see its docstring) is designed around that
+# version's auth behavior -- installing a different version here would
+# silently provision nodes the rest of the codebase can't actually talk to.
+# TODO(Etap 0 R&D): confirm v3.6.0 is still installable via this script
+# (tag names can be pruned/renamed upstream) before the first real deploy.
+THREEXUI_VERSION = "v3.6.0"
 THREEXUI_INSTALL_URL = "https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh"
 
 PANEL_PORT = 2053  # 3x-ui's own default management port

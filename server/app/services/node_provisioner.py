@@ -15,15 +15,7 @@ from app.db.models import Inbound, Node
 from app.services.reality_inbound import build_reality_vless_inbound_payload
 from app.services.reality_keys import generate_reality_keypair, generate_short_id
 from app.services.sni_prober import pick_working_sni
-from app.services.threexui_client import ThreeXUIClient
-
-
-def _node_client(node: Node) -> ThreeXUIClient:
-    return ThreeXUIClient(
-        base_url=node.panel_base_url,
-        login=node.panel_login,
-        password=decrypt_secret(node.panel_password_encrypted),
-    )
+from app.services.threexui_client import get_pooled_client
 
 
 async def provision_default_inbound(node: Node) -> Inbound:
@@ -39,11 +31,8 @@ async def provision_default_inbound(node: Node) -> Inbound:
         sni=sni, private_key=private_key, short_id=short_id, remark=f"vpn-3x-{node.name}"
     )
 
-    threexui = _node_client(node)
-    try:
-        result = await threexui.add_inbound(payload)
-    finally:
-        await threexui.aclose()
+    threexui = get_pooled_client(node)
+    result = await threexui.add_inbound(payload)
 
     return Inbound(
         node_id=node.id,
@@ -82,10 +71,7 @@ async def rotate_inbound_sni(node: Node, inbound: Inbound) -> str:
         port=inbound.port,
     )
 
-    threexui = _node_client(node)
-    try:
-        await threexui.update_inbound(inbound.remote_inbound_id, payload)
-    finally:
-        await threexui.aclose()
+    threexui = get_pooled_client(node)
+    await threexui.update_inbound(inbound.remote_inbound_id, payload)
 
     return new_sni

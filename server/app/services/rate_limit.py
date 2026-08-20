@@ -24,7 +24,11 @@ def _client() -> Redis:
 async def enforce_rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
     redis_key = f"ratelimit:{key}"
     current = await _client().incr(redis_key)
-    if current == 1:
-        await _client().expire(redis_key, window_seconds)
+    # `nx=True` only sets the TTL if the key doesn't already have one --
+    # calling this every time (not just when current == 1) makes the window
+    # self-healing: if the process died between INCR and EXPIRE on some
+    # earlier request, the key would otherwise be left counting forever with
+    # no TTL, permanently rate-limiting whatever this key identifies.
+    await _client().expire(redis_key, window_seconds, nx=True)
     if current > limit:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="rate limit exceeded")

@@ -5,11 +5,11 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import decrypt_secret
-from app.db.models import Client, ClientStatus, Inbound, Node, NodeStatus, User
+from app.db.models import Client, ClientStatus, Inbound, Node, NodeStatus
 from app.schemas.clients import ClientOut
 from app.services.node_balancer import pick_node_for_client
-from app.services.threexui_client import ThreeXUIClient
+from app.services.threexui_client import get_pooled_client
+from app.services.users import get_or_create_user
 from app.services.vless import build_vless_uri
 
 
@@ -32,15 +32,17 @@ async def issue_client(
 
     `target_node_id` bypasses the balancer entirely -- regular users never
     get to pick their node (README requirement), but the admin-issued-config
-    path does explicitly choose one, e.g. to test a specific node."""
+    path does explicitly choose one, e.g. to test a specific node.
 
-    user = (
-        await db.execute(select(User).where(User.telegram_id == telegram_id))
-    ).scalar_one_or_none()
-    if user is None:
-        user = User(telegram_id=telegram_id)
-        db.add(user)
-        await db.flush()
+    Does NOT commit -- the caller adds whatever idempotency-guard row goes
+    with the reason it's issuing a client (a Payment or an AdView) and
+    commits both in one transaction. Committing here instead would let two
+    concurrent requests for the same invoice/impression both pass their
+    "not already credited" check, each mint a Client, and only then collide
+    on the guard row's unique constraint -- leaving one paid-for client
+    granted for free with no way to roll it back."""
+
+    user = await get_or_create_user(db, telegram_id)
 
     if target_node_id is not None:
         node = await db.get(Node, target_node_id)
@@ -62,27 +64,20 @@ async def issue_client(
     email = f"{telegram_id}-{client_uuid[:8]}"
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
 
-    threexui = ThreeXUIClient(
-        base_url=node.panel_base_url,
-        login=node.panel_login,
-        password=decrypt_secret(node.panel_password_encrypted),
+    threexui = get_pooled_client(node)
+    await threexui.add_client(
+        inbound_id=inbound.remote_inbound_id,
+        client_settings={
+            "clients": [
+                {
+                    "id": client_uuid,
+                    "email": email,
+                    "flow": "xtls-rprx-vision",
+                    "expiryTime": int(expires_at.timestamp() * 1000),
+                }
+            ]
+        },
     )
-    try:
-        await threexui.add_client(
-            inbound_id=inbound.remote_inbound_id,
-            client_settings={
-                "clients": [
-                    {
-                        "id": client_uuid,
-                        "email": email,
-                        "flow": "xtls-rprx-vision",
-                        "expiryTime": int(expires_at.timestamp() * 1000),
-                    }
-                ]
-            },
-        )
-    finally:
-        await threexui.aclose()
 
     client = Client(
         inbound_id=inbound.id,
@@ -93,8 +88,7 @@ async def issue_client(
         expires_at=expires_at,
     )
     db.add(client)
-    await db.commit()
-    await db.refresh(client)
+    await db.flush()
 
     vless_uri = build_vless_uri(node, inbound, client_uuid, remark="vpn-3x")
     return ClientOut(id=client.id, status=client.status, expires_at=client.expires_at, vless_uri=vless_uri)

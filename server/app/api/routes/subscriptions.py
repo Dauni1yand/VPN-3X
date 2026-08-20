@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_internal_api_key
-from app.db.models import AdView, Payment, PaymentStatus, User
+from app.db.models import AdView, Payment, PaymentStatus
 from app.db.session import get_db
 from app.schemas.clients import ClientOut
 from app.schemas.subscriptions import AdViewGrant, PaymentConfirm
 from app.services.client_issuer import issue_client
 from app.services.rate_limit import enforce_rate_limit
 from app.services.settings_store import get_setting
+from app.services.users import get_or_create_user
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"], dependencies=[Depends(require_internal_api_key)])
 
@@ -49,9 +51,7 @@ async def grant_ad_view(
         client_latencies=payload.client_latencies,
     )
 
-    user = (
-        await db.execute(select(User).where(User.telegram_id == payload.user_telegram_id))
-    ).scalar_one()
+    user = await get_or_create_user(db, payload.user_telegram_id)
     db.add(
         AdView(
             user_id=user.id,
@@ -60,7 +60,14 @@ async def grant_ad_view(
             provider_impression_id=payload.provider_impression_id,
         )
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two concurrent requests for the same impression both passed the
+        # check above before either committed -- the loser's AdView insert
+        # collides with the unique constraint instead of granting free time.
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="ad impression already credited")
     return client
 
 
@@ -81,13 +88,7 @@ async def confirm_payment(payload: PaymentConfirm, db: AsyncSession = Depends(ge
     if existing is not None and existing.status == PaymentStatus.paid:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="payment already processed")
 
-    user = (
-        await db.execute(select(User).where(User.telegram_id == payload.user_telegram_id))
-    ).scalar_one_or_none()
-    if user is None:
-        user = User(telegram_id=payload.user_telegram_id)
-        db.add(user)
-        await db.flush()
+    user = await get_or_create_user(db, payload.user_telegram_id)
 
     duration = int(await get_setting(db, "subscription_duration_seconds"))
     client = await issue_client(
@@ -110,5 +111,13 @@ async def confirm_payment(payload: PaymentConfirm, db: AsyncSession = Depends(ge
         )
     else:
         existing.status = PaymentStatus.paid
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Same race as grant_ad_view above: a concurrent duplicate for the
+        # same invoice_id (double-tap on "I paid" racing the webhook, say)
+        # collides on the unique constraint instead of issuing a second
+        # client for one payment.
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="payment already processed")
     return client
