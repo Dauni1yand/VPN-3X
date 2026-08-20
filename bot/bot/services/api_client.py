@@ -1,0 +1,74 @@
+"""Client for the main server's internal API (see server/app/api/routes).
+Authenticates with the shared `internal_api_key`, per PLAN.md section 4."""
+
+from __future__ import annotations
+
+import httpx
+
+from bot.config import settings
+
+
+class ServerAPIClient:
+    def __init__(self) -> None:
+        self._http = httpx.AsyncClient(
+            base_url=settings.server_api_url,
+            headers={"X-API-Key": settings.internal_api_key},
+            timeout=15.0,
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def list_nodes(self) -> list[dict]:
+        resp = await self._http.get("/nodes")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def add_node(self, name: str, ip: str, panel_base_url: str, panel_login: str, panel_password: str) -> dict:
+        resp = await self._http.post(
+            "/nodes",
+            json={
+                "name": name,
+                "ip": ip,
+                "panel_base_url": panel_base_url,
+                "panel_login": panel_login,
+                "panel_password": panel_password,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def delete_node(self, node_id: str) -> None:
+        resp = await self._http.delete(f"/nodes/{node_id}")
+        resp.raise_for_status()
+
+    async def grant_ad_view(self, telegram_id: int, ad_type: str, provider_impression_id: str) -> dict:
+        resp = await self._http.post(
+            "/subscriptions/ad-view",
+            json={
+                "user_telegram_id": telegram_id,
+                "ad_type": ad_type,
+                "provider_impression_id": provider_impression_id,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def confirm_payment(
+        self, telegram_id: int, provider_invoice_id: str, plan_code: str, amount: str, currency: str
+    ) -> dict:
+        resp = await self._http.post(
+            "/subscriptions/payments/confirm",
+            json={
+                "user_telegram_id": telegram_id,
+                "provider_invoice_id": provider_invoice_id,
+                "plan_code": plan_code,
+                "amount": amount,
+                "currency": currency,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+server_api = ServerAPIClient()
