@@ -8,11 +8,18 @@ from app.db.session import get_db
 from app.schemas.clients import ClientOut
 from app.schemas.subscriptions import AdViewGrant, PaymentConfirm
 from app.services.client_issuer import issue_client
+from app.services.rate_limit import enforce_rate_limit
 from app.services.settings_store import get_setting
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"], dependencies=[Depends(require_internal_api_key)])
 
 _AD_DURATION_SETTING_KEY = {"short": "ad_short_duration_seconds", "long": "ad_long_duration_seconds"}
+
+# Loose enough for legitimate repeated ad-watching (a 15-min ad every 15
+# min is 4/hour), tight enough to bound a script spamming fake impression
+# IDs -- defense in depth on top of Cloudflare's edge rate limiting.
+AD_VIEW_RATE_LIMIT = 20
+AD_VIEW_RATE_WINDOW_SECONDS = 60 * 60
 
 
 @router.post("/ad-view", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
@@ -21,6 +28,9 @@ async def grant_ad_view(
     db: AsyncSession = Depends(get_db),
     cf_ip_country: str | None = Header(default=None, alias="CF-IPCountry"),
 ) -> ClientOut:
+    await enforce_rate_limit(
+        f"ad-view:{payload.user_telegram_id}", limit=AD_VIEW_RATE_LIMIT, window_seconds=AD_VIEW_RATE_WINDOW_SECONDS
+    )
     existing = (
         await db.execute(
             select(AdView).where(AdView.provider_impression_id == payload.provider_impression_id)

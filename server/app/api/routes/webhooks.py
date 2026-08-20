@@ -11,8 +11,15 @@ from app.api.routes.subscriptions import confirm_payment
 from app.db.session import get_db
 from app.schemas.subscriptions import PaymentConfirm
 from app.services.cryptobot_webhook import verify_webhook_signature
+from app.services.rate_limit import enforce_rate_limit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# This endpoint has no shared-secret gate (require_internal_api_key) since
+# CryptoBot, not our own bot, calls it -- rate-limit by IP as a cheap guard
+# before even touching the signature check.
+CRYPTOBOT_WEBHOOK_RATE_LIMIT = 60
+CRYPTOBOT_WEBHOOK_RATE_WINDOW_SECONDS = 60
 
 
 @router.post("/cryptobot", status_code=status.HTTP_200_OK)
@@ -21,6 +28,13 @@ async def cryptobot_webhook(
     db: AsyncSession = Depends(get_db),
     signature: str = Header(default="", alias="crypto-pay-api-signature"),
 ) -> dict:
+    client_ip = request.client.host if request.client else "unknown"
+    await enforce_rate_limit(
+        f"cryptobot-webhook:{client_ip}",
+        limit=CRYPTOBOT_WEBHOOK_RATE_LIMIT,
+        window_seconds=CRYPTOBOT_WEBHOOK_RATE_WINDOW_SECONDS,
+    )
+
     raw_body = await request.body()
     if not verify_webhook_signature(raw_body, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad signature")

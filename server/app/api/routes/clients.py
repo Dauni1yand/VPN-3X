@@ -10,9 +10,16 @@ from app.services.audit import log_admin_action
 from app.services.client_issuer import issue_client
 from app.services.client_migrator import migrate_client
 from app.services.node_balancer import pick_node_for_client
+from app.services.rate_limit import enforce_rate_limit
 from app.services.vless import build_vless_uri
 
 router = APIRouter(prefix="/clients", tags=["clients"], dependencies=[Depends(require_internal_api_key)])
+
+# Defense in depth on top of Cloudflare's edge rate limiting (README: main
+# server sits behind Cloudflare) -- generous enough not to bother a real
+# user, tight enough to bound a scripted issuance loop.
+ISSUE_CLIENT_RATE_LIMIT = 10
+ISSUE_CLIENT_RATE_WINDOW_SECONDS = 60 * 60
 
 
 @router.post("", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
@@ -21,6 +28,11 @@ async def create_client(
     db: AsyncSession = Depends(get_db),
     cf_ip_country: str | None = Header(default=None, alias="CF-IPCountry"),
 ) -> ClientOut:
+    await enforce_rate_limit(
+        f"issue-client:{payload.user_telegram_id}",
+        limit=ISSUE_CLIENT_RATE_LIMIT,
+        window_seconds=ISSUE_CLIENT_RATE_WINDOW_SECONDS,
+    )
     return await issue_client(
         db,
         payload.user_telegram_id,
