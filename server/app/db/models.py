@@ -100,6 +100,11 @@ class Inbound(Base):
     port: Mapped[int] = mapped_column()
     sni: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reality_public_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Encrypted at rest (same scheme as Node.panel_password_encrypted) --
+    # needed to rotate the inbound's SNI in place without regenerating the
+    # keypair (which would invalidate every already-issued client config's
+    # `pbk`, not just the ones affected by the SNI change).
+    reality_private_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     reality_short_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

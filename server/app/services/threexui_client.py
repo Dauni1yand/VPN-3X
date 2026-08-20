@@ -64,6 +64,12 @@ class ThreeXUIClient:
         resp = await self._request("POST", "/panel/api/inbounds/add", json=payload)
         return resp.json().get("obj", {})
 
+    async def update_inbound(self, inbound_id: int, payload: dict) -> dict:
+        """Used to rotate an inbound's REALITY dest/SNI in place, without
+        recreating it (and therefore without losing its existing clients)."""
+        resp = await self._request("POST", f"/panel/api/inbounds/update/{inbound_id}", json=payload)
+        return resp.json().get("obj", {})
+
     async def add_client(self, inbound_id: int, client_settings: dict) -> dict:
         resp = await self._request(
             "POST",

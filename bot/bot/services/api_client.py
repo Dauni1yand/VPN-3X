@@ -51,6 +51,16 @@ class ServerAPIClient:
         resp = await self._http.delete(f"/nodes/{node_id}")
         resp.raise_for_status()
 
+    async def provision_inbound(self, node_id: str) -> dict:
+        resp = await self._http.post(f"/nodes/{node_id}/inbound")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def rotate_sni(self, node_id: str) -> dict:
+        resp = await self._http.post(f"/nodes/{node_id}/inbound/rotate-sni")
+        resp.raise_for_status()
+        return resp.json()
+
     async def grant_ad_view(self, telegram_id: int, ad_type: str, provider_impression_id: str) -> dict:
         resp = await self._http.post(
             "/subscriptions/ad-view",

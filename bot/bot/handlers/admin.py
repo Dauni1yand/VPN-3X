@@ -50,3 +50,30 @@ async def cmd_delete_node(message: Message) -> None:
         return
     await server_api.delete_node(parts[1])
     await message.answer("Нода удалена.")
+
+
+@router.message(Command("provision"))
+async def cmd_provision(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Использование: /provision <node_id>")
+        return
+    inbound = await server_api.provision_inbound(parts[1])
+    await message.answer(
+        f"Инбаунд создан: порт {inbound['port']}, sni={inbound['sni']}"
+    )
+
+
+@router.message(Command("rotatesni"))
+async def cmd_rotate_sni(message: Message) -> None:
+    # README (тг-бот, вариант админа): "изменять параметры нод (смена сни,
+    # админ нажимает кнопку и главный сервер проверяет рабочие варианты сни
+    # для конкретной ноды и устанавливает его)".
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Использование: /rotatesni <node_id>")
+        return
+    inbound = await server_api.rotate_sni(parts[1])
+    await message.answer(
+        f"Новый sni: {inbound['sni']}. Ранее выданные конфиги для этой ноды перестанут работать."
+    )
