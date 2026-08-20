@@ -13,7 +13,20 @@ class Settings(BaseSettings):
     # Shared secret the Telegram bot presents to call the internal API.
     internal_api_key: str
 
+    # Same Crypto Pay API token used both to call CryptoBot and (per its
+    # webhook-signature scheme) to verify webhooks come from it.
     cryptobot_api_token: str = ""
+
+    # Used only to push alert notifications straight to the admin(s)
+    # (README: health-check alerting -> уведомление в тг). Same bot token as
+    # the bot service; the server calls the Telegram HTTP API directly so
+    # alerting doesn't depend on the bot process being up.
+    telegram_bot_token: str = ""
+    telegram_admin_ids: str = ""
+
+    @property
+    def admin_ids(self) -> list[int]:
+        return [int(x) for x in self.telegram_admin_ids.split(",") if x.strip()]
 
 
 settings = Settings()

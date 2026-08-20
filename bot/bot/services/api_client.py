@@ -31,7 +31,8 @@ class ServerAPIClient:
         panel_base_url: str,
         panel_login: str,
         panel_password: str,
-        country: str | None = None,
+        country: str | None,
+        admin_telegram_id: int,
     ) -> dict:
         resp = await self._http.post(
             "/nodes",
@@ -42,17 +43,18 @@ class ServerAPIClient:
                 "panel_login": panel_login,
                 "panel_password": panel_password,
                 "country": country,
+                "admin_telegram_id": admin_telegram_id,
             },
         )
         resp.raise_for_status()
         return resp.json()
 
-    async def delete_node(self, node_id: str) -> None:
-        resp = await self._http.delete(f"/nodes/{node_id}")
+    async def delete_node(self, node_id: str, admin_telegram_id: int) -> None:
+        resp = await self._http.delete(f"/nodes/{node_id}", params={"admin_telegram_id": admin_telegram_id})
         resp.raise_for_status()
 
     async def bootstrap_node(
-        self, name: str, ip: str, ssh_password: str, country: str | None, ssh_user: str = "root"
+        self, name: str, ip: str, ssh_password: str, country: str | None, admin_telegram_id: int, ssh_user: str = "root"
     ) -> dict:
         resp = await self._http.post(
             "/nodes/bootstrap",
@@ -62,19 +64,37 @@ class ServerAPIClient:
                 "ssh_user": ssh_user,
                 "ssh_password": ssh_password,
                 "country": country,
+                "admin_telegram_id": admin_telegram_id,
             },
             timeout=300,  # install.sh + apt update genuinely takes a while
         )
         resp.raise_for_status()
         return resp.json()
 
-    async def provision_inbound(self, node_id: str) -> dict:
-        resp = await self._http.post(f"/nodes/{node_id}/inbound")
+    async def provision_inbound(self, node_id: str, admin_telegram_id: int) -> dict:
+        resp = await self._http.post(f"/nodes/{node_id}/inbound", params={"admin_telegram_id": admin_telegram_id})
         resp.raise_for_status()
         return resp.json()
 
-    async def rotate_sni(self, node_id: str) -> dict:
-        resp = await self._http.post(f"/nodes/{node_id}/inbound/rotate-sni")
+    async def rotate_sni(self, node_id: str, admin_telegram_id: int) -> dict:
+        resp = await self._http.post(
+            f"/nodes/{node_id}/inbound/rotate-sni", params={"admin_telegram_id": admin_telegram_id}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_setting(self, key: str) -> str:
+        resp = await self._http.get(f"/settings/{key}")
+        resp.raise_for_status()
+        return resp.json()["value"]
+
+    async def list_settings(self) -> dict[str, str]:
+        resp = await self._http.get("/settings")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def set_setting(self, key: str, value: str, admin_telegram_id: int) -> dict:
+        resp = await self._http.put(f"/settings/{key}", json={"value": value, "admin_telegram_id": admin_telegram_id})
         resp.raise_for_status()
         return resp.json()
 

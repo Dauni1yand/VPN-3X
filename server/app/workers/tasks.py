@@ -7,26 +7,18 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.core.security import decrypt_secret
-from app.db.models import Alert, AlertStatus, Node, NodeStatus, Setting
+from app.db.models import Alert, AlertStatus, Node, NodeStatus
 from app.db.session import async_session_maker
+from app.services.settings_store import get_setting
+from app.services.telegram_notifier import notify_admins
 from app.services.threexui_client import ThreeXUIClient
-
-# TODO(Etap 2): read from the `settings` table so an admin can tune this via
-# the bot (README: "порог срабатывания можно настроить через админку в тг").
-DEFAULT_CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3
-
-
-async def _get_alert_threshold(db) -> int:
-    setting = await db.get(Setting, "node_alert_consecutive_failure_threshold")
-    if setting is None:
-        return DEFAULT_CONSECUTIVE_FAILURE_ALERT_THRESHOLD
-    return int(setting.value)
 
 
 async def health_check_nodes(ctx) -> None:
     async with async_session_maker() as db:
-        threshold = await _get_alert_threshold(db)
+        threshold = int(await get_setting(db, "node_alert_consecutive_failure_threshold"))
         nodes = (await db.execute(select(Node))).scalars().all()
+        new_alerts: list[Alert] = []
 
         for node in nodes:
             client = ThreeXUIClient(
@@ -48,13 +40,13 @@ async def health_check_nodes(ctx) -> None:
                         )
                     ).scalar_one_or_none()
                     if existing_open_alert is None:
-                        db.add(
-                            Alert(
-                                node_id=node.id,
-                                alert_type="node_unstable",
-                                message=f"{node.consecutive_failures} consecutive health-check failures: {exc}",
-                            )
+                        alert = Alert(
+                            node_id=node.id,
+                            alert_type="node_unstable",
+                            message=f"{node.consecutive_failures} consecutive health-check failures: {exc}",
                         )
+                        db.add(alert)
+                        new_alerts.append(alert)
             else:
                 if node.consecutive_failures > 0 or node.status != NodeStatus.active:
                     node.consecutive_failures = 0
@@ -63,3 +55,8 @@ async def health_check_nodes(ctx) -> None:
                 await client.aclose()
 
         await db.commit()
+
+        # Sent after commit: a Telegram outage must never roll back an
+        # already-detected node status change.
+        for alert in new_alerts:
+            await notify_admins(f"⚠️ Нода {alert.node_id} нестабильна: {alert.message}")

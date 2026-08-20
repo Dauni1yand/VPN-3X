@@ -14,6 +14,7 @@ class NodeCreate(BaseModel):
     # ISO-3166 alpha-2, e.g. "NL" -- used by the balancer as a coarse latency
     # proxy when the caller has no measured RTT (see node_balancer.py).
     country: str | None = None
+    admin_telegram_id: int
 
 
 class NodeBootstrapRequest(BaseModel):
@@ -24,11 +25,13 @@ class NodeBootstrapRequest(BaseModel):
     ssh_port: int = 22
     ssh_password: str | None = Field(default=None, repr=False)
     ssh_private_key: str | None = Field(default=None, repr=False)
+    admin_telegram_id: int
 
 
 class NodeCredentialsUpdate(BaseModel):
     panel_login: str | None = None
     panel_password: str | None = Field(default=None, repr=False)
+    admin_telegram_id: int
 
 
 class NodeOut(BaseModel):

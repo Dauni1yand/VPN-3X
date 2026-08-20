@@ -6,18 +6,21 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from bot.config import settings
 from bot.services.api_client import server_api
 from bot.services.cryptobot import cryptobot
 
 router = Router(name="user")
 
-# TODO(Etap 3/6): price and plan_code should come from the server's
-# admin-tunable `settings` table, not be hardcoded here.
+
+class SupportForm(StatesGroup):
+    waiting_for_message = State()
+
 SUBSCRIPTION_PLAN_CODE = "monthly"
-SUBSCRIPTION_PRICE_AMOUNT = "5"
-SUBSCRIPTION_PRICE_ASSET = "USDT"
 
 
 @router.message(Command("start"))
@@ -31,9 +34,12 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message) -> None:
+    amount = await server_api.get_setting("subscription_price_amount")
+    asset = await server_api.get_setting("subscription_price_asset")
+
     invoice = await cryptobot.create_invoice(
-        amount=SUBSCRIPTION_PRICE_AMOUNT,
-        asset=SUBSCRIPTION_PRICE_ASSET,
+        amount=amount,
+        asset=asset,
         description="VPN-3X подписка",
         payload=f"{message.from_user.id}:{SUBSCRIPTION_PLAN_CODE}",
     )
@@ -49,7 +55,10 @@ async def cmd_subscribe(message: Message) -> None:
         ]
     )
     await message.answer(
-        f"Счёт на {SUBSCRIPTION_PRICE_AMOUNT} {SUBSCRIPTION_PRICE_ASSET} создан.", reply_markup=keyboard
+        f"Счёт на {amount} {asset} создан.\n"
+        "Оплата обычно засчитывается автоматически в течение минуты, "
+        "кнопка «Я оплатил(а)» — на случай, если хочется проверить сразу.",
+        reply_markup=keyboard,
     )
 
 
@@ -62,19 +71,45 @@ async def cb_check_payment(callback: CallbackQuery) -> None:
         await callback.answer("Оплата ещё не найдена, попробуйте позже.", show_alert=True)
         return
 
+    amount = await server_api.get_setting("subscription_price_amount")
+    asset = await server_api.get_setting("subscription_price_asset")
     result = await server_api.confirm_payment(
         telegram_id=callback.from_user.id,
         provider_invoice_id=str(invoice_id),
         plan_code=SUBSCRIPTION_PLAN_CODE,
-        amount=SUBSCRIPTION_PRICE_AMOUNT,
-        currency=SUBSCRIPTION_PRICE_ASSET,
+        amount=amount,
+        currency=asset,
     )
     await callback.message.answer(f"Оплата подтверждена!\nКонфиг: `{result['vless_uri']}`", parse_mode="Markdown")
     await callback.answer()
 
 
 @router.message(Command("support"))
-async def cmd_support(message: Message) -> None:
-    # TODO(Etap 3): forward to an actual support queue/admin chat instead of
-    # just acknowledging -- this is a placeholder.
+async def cmd_support(message: Message, state: FSMContext) -> None:
+    await state.set_state(SupportForm.waiting_for_message)
     await message.answer("Опишите проблему одним сообщением, мы её передадим в поддержку.")
+
+
+@router.message(SupportForm.waiting_for_message)
+async def handle_support_message(message: Message, state: FSMContext) -> None:
+    await state.clear()
+
+    if not settings.admin_ids:
+        await message.answer("Поддержка пока не настроена, попробуйте позже.")
+        return
+
+    forwarded_to_any = False
+    for admin_id in settings.admin_ids:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"Обращение в поддержку от {message.from_user.id} (@{message.from_user.username}):\n\n{message.text}",
+            )
+            forwarded_to_any = True
+        except Exception:  # noqa: BLE001 -- one admin's chat being unreachable shouldn't fail the others
+            pass
+
+    if forwarded_to_any:
+        await message.answer("Сообщение передано в поддержку, скоро ответим.")
+    else:
+        await message.answer("Не удалось передать сообщение в поддержку, попробуйте позже.")

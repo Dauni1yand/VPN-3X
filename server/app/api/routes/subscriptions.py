@@ -8,13 +8,11 @@ from app.db.session import get_db
 from app.schemas.clients import ClientOut
 from app.schemas.subscriptions import AdViewGrant, PaymentConfirm
 from app.services.client_issuer import issue_client
+from app.services.settings_store import get_setting
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"], dependencies=[Depends(require_internal_api_key)])
 
-# TODO(Etap 3/6): durations and plan->duration mapping should come from the
-# `settings` table (admin-tunable via the bot), not be hardcoded here.
-AD_DURATIONS_SECONDS = {"short": 15 * 60, "long": 60 * 60}
-DEFAULT_SUBSCRIPTION_DURATION_SECONDS = 30 * 24 * 60 * 60
+_AD_DURATION_SETTING_KEY = {"short": "ad_short_duration_seconds", "long": "ad_long_duration_seconds"}
 
 
 @router.post("/ad-view", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
@@ -31,7 +29,7 @@ async def grant_ad_view(
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="ad impression already credited")
 
-    duration = AD_DURATIONS_SECONDS[payload.ad_type.value]
+    duration = int(await get_setting(db, _AD_DURATION_SETTING_KEY[payload.ad_type.value]))
 
     client = await issue_client(
         db,
@@ -81,10 +79,11 @@ async def confirm_payment(payload: PaymentConfirm, db: AsyncSession = Depends(ge
         db.add(user)
         await db.flush()
 
+    duration = int(await get_setting(db, "subscription_duration_seconds"))
     client = await issue_client(
         db,
         payload.user_telegram_id,
-        DEFAULT_SUBSCRIPTION_DURATION_SECONDS,
+        duration,
         client_latencies=payload.client_latencies,
     )
 

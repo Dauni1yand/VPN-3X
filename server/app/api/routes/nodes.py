@@ -8,6 +8,7 @@ from app.db.models import Inbound, Node, NodeStatus
 from app.db.session import get_db
 from app.schemas.inbounds import InboundOut
 from app.schemas.nodes import NodeBootstrapRequest, NodeCreate, NodeCredentialsUpdate, NodeOut
+from app.services.audit import log_admin_action
 from app.services.node_bootstrap import NodeBootstrapError, bootstrap_node
 from app.services.node_provisioner import provision_default_inbound, rotate_inbound_sni
 
@@ -25,6 +26,8 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)) -
         country=payload.country.upper() if payload.country else None,
     )
     db.add(node)
+    await db.flush()
+    log_admin_action(db, admin_telegram_id=payload.admin_telegram_id, action="create_node", target=node.id)
     await db.commit()
     await db.refresh(node)
     return node
@@ -49,16 +52,18 @@ async def update_node_credentials(
     if payload.panel_password:
         node.panel_password_encrypted = encrypt_secret(payload.panel_password)
 
+    log_admin_action(db, admin_telegram_id=payload.admin_telegram_id, action="update_node_credentials", target=node.id)
     await db.commit()
     await db.refresh(node)
     return node
 
 
 @router.delete("/{node_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_node(node_id: str, db: AsyncSession = Depends(get_db)) -> None:
+async def delete_node(node_id: str, admin_telegram_id: int, db: AsyncSession = Depends(get_db)) -> None:
     node = await db.get(Node, node_id)
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node not found")
+    log_admin_action(db, admin_telegram_id=admin_telegram_id, action="delete_node", target=node.id)
     await db.delete(node)
     await db.commit()
 
@@ -97,13 +102,14 @@ async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession =
     db.add(inbound)
     node.status = NodeStatus.active
 
+    log_admin_action(db, admin_telegram_id=payload.admin_telegram_id, action="bootstrap_node", target=node.id)
     await db.commit()
     await db.refresh(node)
     return node
 
 
 @router.post("/{node_id}/inbound", response_model=InboundOut, status_code=status.HTTP_201_CREATED)
-async def provision_inbound(node_id: str, db: AsyncSession = Depends(get_db)) -> Inbound:
+async def provision_inbound(node_id: str, admin_telegram_id: int, db: AsyncSession = Depends(get_db)) -> Inbound:
     """Auto-provisions the node's VLESS+REALITY+XTLS inbound: probes for a
     working SNI, generates a fresh REALITY keypair, and creates the inbound
     on the node's 3x-ui panel (README: "настраивать с нуля ноды, делать
@@ -123,13 +129,14 @@ async def provision_inbound(node_id: str, db: AsyncSession = Depends(get_db)) ->
     db.add(inbound)
     node.status = NodeStatus.active
     node.consecutive_failures = 0
+    log_admin_action(db, admin_telegram_id=admin_telegram_id, action="provision_inbound", target=node.id)
     await db.commit()
     await db.refresh(inbound)
     return inbound
 
 
 @router.post("/{node_id}/inbound/rotate-sni", response_model=InboundOut)
-async def rotate_sni(node_id: str, db: AsyncSession = Depends(get_db)) -> Inbound:
+async def rotate_sni(node_id: str, admin_telegram_id: int, db: AsyncSession = Depends(get_db)) -> Inbound:
     """Re-probes for a working SNI and swaps the inbound's REALITY dest in
     place (README: admin can trigger this from the bot when a node's current
     SNI gets blocked). Existing clients on the inbound are kept, but every
@@ -147,6 +154,7 @@ async def rotate_sni(node_id: str, db: AsyncSession = Depends(get_db)) -> Inboun
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node has no inbound to rotate")
 
     inbound.sni = await rotate_inbound_sni(node, inbound)
+    log_admin_action(db, admin_telegram_id=admin_telegram_id, action="rotate_sni", target=node.id, details=inbound.sni)
     await db.commit()
     await db.refresh(inbound)
     return inbound
