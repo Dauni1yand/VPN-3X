@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import settings
-from bot.handlers import admin, user
+from bot.handlers import admin, common, user
 
 
 async def main() -> None:
@@ -17,6 +17,9 @@ async def main() -> None:
     # be scaled out horizontally); state wouldn't survive a multi-instance
     # bot deployment.
     dp = Dispatcher(storage=MemoryStorage())
+    # common first: it owns "cancel", which has to work identically whether
+    # the wizard being cancelled was started from the admin or the user side.
+    dp.include_router(common.router)
     dp.include_router(admin.router)
     dp.include_router(user.router)
 

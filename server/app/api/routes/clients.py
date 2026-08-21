@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_internal_api_key
-from app.db.models import Client, Inbound, Node, NodeStatus
+from app.db.models import Client, ClientStatus, Inbound, Node, NodeStatus, User
 from app.db.session import get_db
 from app.schemas.clients import AdminClientCreate, ClientCreate, ClientMigrate, ClientOut
 from app.services.audit import log_admin_action
@@ -42,6 +44,43 @@ async def create_client(
     )
     await db.commit()
     return client
+
+
+@router.get("/by-user/{telegram_id}", response_model=ClientOut)
+async def get_user_client(telegram_id: int, db: AsyncSession = Depends(get_db)) -> ClientOut:
+    """The user's current live config, for the bot's "Мой конфиг" button.
+    404 when they have none -- either they never got one, or the last one
+    expired (in which case they need to pay/watch an ad again)."""
+
+    now = datetime.now(timezone.utc)
+    row = (
+        await db.execute(
+            select(Client, Inbound, Node)
+            .join(Inbound, Client.inbound_id == Inbound.id)
+            .join(Node, Inbound.node_id == Node.id)
+            .join(User, Client.user_id == User.id)
+            .where(
+                User.telegram_id == telegram_id,
+                Client.status == ClientStatus.active,
+                Client.expires_at > now,
+            )
+            # Longest-lived first: a user who topped up while still having
+            # time left has more than one live client, and the one that
+            # runs out last is the one worth handing back.
+            .order_by(Client.expires_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no active config")
+
+    client, inbound, node = row
+    return ClientOut(
+        id=client.id,
+        status=client.status,
+        expires_at=client.expires_at,
+        vless_uri=build_vless_uri(node, inbound, client.remote_client_uuid, remark="vpn-3x"),
+    )
 
 
 @router.post("/admin", response_model=ClientOut, status_code=status.HTTP_201_CREATED)

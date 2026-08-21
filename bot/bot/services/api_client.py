@@ -24,6 +24,15 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_user_client(self, telegram_id: int) -> dict | None:
+        """None when the user has no live config -- a normal state (never
+        subscribed, or it ran out), not an error worth raising over."""
+        resp = await self._http.get(f"/clients/by-user/{telegram_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
     async def add_node(
         self,
         name: str,

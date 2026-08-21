@@ -45,6 +45,11 @@ class NodeOut(BaseModel):
     consecutive_failures: int
     created_at: datetime
     updated_at: datetime
+    # Whether the node already has its REALITY inbound. Lets the bot show
+    # "создать инбаунд" vs "сменить SNI" without a second round trip per
+    # node. Defaults False so the routes that build a NodeOut straight from
+    # a freshly created Node (which never has one yet) stay correct.
+    has_inbound: bool = False
 
     class Config:
         from_attributes = True

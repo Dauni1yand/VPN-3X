@@ -34,9 +34,15 @@ async def create_node(payload: NodeCreate, db: AsyncSession = Depends(get_db)) -
 
 
 @router.get("", response_model=list[NodeOut])
-async def list_nodes(db: AsyncSession = Depends(get_db)) -> list[Node]:
-    result = await db.execute(select(Node).order_by(Node.created_at))
-    return list(result.scalars())
+async def list_nodes(db: AsyncSession = Depends(get_db)) -> list[NodeOut]:
+    nodes = list((await db.execute(select(Node).order_by(Node.created_at))).scalars())
+    # One query for every node's inbound state rather than one per node --
+    # the bot renders this list on every "Ноды" tap.
+    with_inbound = set((await db.execute(select(Inbound.node_id).distinct())).scalars())
+    return [
+        NodeOut.model_validate(node).model_copy(update={"has_inbound": node.id in with_inbound})
+        for node in nodes
+    ]
 
 
 @router.patch("/{node_id}/credentials", response_model=NodeOut)
