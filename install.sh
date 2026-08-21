@@ -1,174 +1,64 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# =============================================================================
-# VPN-3X Ubuntu Installer
-# =============================================================================
-#
-# Supported:
-#   Ubuntu 22.04 LTS
-#   Ubuntu 24.04 LTS
-#
-# Run:
-#   sudo ./install.sh
-#
-# Expected repository:
-#
-#   VPN-3X/
-#   ├── install.sh
-#   ├── docker-compose.yml
-#   ├── server/
-#   │   ├── Dockerfile
-#   │   ├── requirements.txt
-#   │   └── app/
-#   ├── bot/
-#   │   ├── Dockerfile
-#   │   └── ...
-#   └── migrations/
-#       ├── alembic.ini
-#       ├── env.py
-#       └── versions/
-#
-# =============================================================================
-
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${APP_DIR}/.env"
 COMPOSE_FILE="${APP_DIR}/docker-compose.yml"
 
-POSTGRES_SERVICE="db"
-REDIS_SERVICE="redis"
-SERVER_SERVICE="server"
-WORKER_SERVICE="worker"
-BOT_SERVICE="bot"
-
-HEALTH_URL="http://127.0.0.1:8000/health"
-
-export DEBIAN_FRONTEND=noninteractive
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
 log() {
     echo
-    echo "================================================================"
+    echo "============================================================"
     echo "$1"
-    echo "================================================================"
-}
-
-info() {
-    echo "[INFO] $1"
-}
-
-warn() {
-    echo "[WARN] $1"
+    echo "============================================================"
 }
 
 die() {
-    echo
     echo "[ERROR] $1"
     exit 1
 }
 
-on_error() {
-    local exit_code=$?
-
-    echo
-    echo "================================================================"
-    echo "VPN-3X INSTALLATION FAILED"
-    echo "================================================================"
-    echo
-    echo "Exit code: ${exit_code}"
-    echo
-    echo "Diagnostics:"
-    echo
-    echo "  cd ${APP_DIR}"
-    echo "  docker compose ps"
-    echo "  docker compose logs --tail=150"
-    echo
-    echo "Systemd:"
-    echo "  systemctl status vpn-3x.service"
-    echo
-
-    exit "${exit_code}"
-}
-
-trap on_error ERR
-
-
-# =============================================================================
+# ------------------------------------------------------------
 # Root
-# =============================================================================
+# ------------------------------------------------------------
 
-if [[ "${EUID}" -ne 0 ]]; then
-    die "Run as root: sudo ./install.sh"
+if [[ "$EUID" -ne 0 ]]; then
+    die "Запусти скрипт через sudo: sudo ./install.sh"
 fi
 
+cd "$APP_DIR"
 
-# =============================================================================
-# Repository validation
-# =============================================================================
+# ------------------------------------------------------------
+# Check repository
+# ------------------------------------------------------------
 
-log "Checking repository"
+log "Проверка проекта"
 
-[[ -f "${COMPOSE_FILE}" ]] \
-    || die "docker-compose.yml not found."
+[[ -f "$COMPOSE_FILE" ]] || die "Не найден docker-compose.yml"
+[[ -f "$APP_DIR/server/Dockerfile" ]] || die "Не найден server/Dockerfile"
+[[ -f "$APP_DIR/server/requirements.txt" ]] || die "Не найден server/requirements.txt"
+[[ -f "$APP_DIR/bot/Dockerfile" ]] || die "Не найден bot/Dockerfile"
+[[ -f "$APP_DIR/migrations/alembic.ini" ]] || die "Не найден migrations/alembic.ini"
+[[ -f "$APP_DIR/migrations/env.py" ]] || die "Не найден migrations/env.py"
 
-[[ -f "${APP_DIR}/server/Dockerfile" ]] \
-    || die "server/Dockerfile not found."
+# ------------------------------------------------------------
+# Ubuntu
+# ------------------------------------------------------------
 
-[[ -f "${APP_DIR}/server/requirements.txt" ]] \
-    || die "server/requirements.txt not found."
-
-[[ -f "${APP_DIR}/bot/Dockerfile" ]] \
-    || die "bot/Dockerfile not found."
-
-[[ -f "${APP_DIR}/migrations/alembic.ini" ]] \
-    || die "migrations/alembic.ini not found."
-
-[[ -f "${APP_DIR}/migrations/env.py" ]] \
-    || die "migrations/env.py not found."
-
-[[ -d "${APP_DIR}/migrations/versions" ]] \
-    || die "migrations/versions directory not found."
-
-cd "${APP_DIR}"
-
-info "Repository: ${APP_DIR}"
-
-
-# =============================================================================
-# OS validation
-# =============================================================================
-
-log "Checking operating system"
-
-[[ -f /etc/os-release ]] \
-    || die "/etc/os-release not found."
+log "Проверка Ubuntu"
 
 source /etc/os-release
 
 if [[ "${ID:-}" != "ubuntu" ]]; then
-    die "Ubuntu is required. Detected: ${PRETTY_NAME:-unknown}"
+    die "Этот installer предназначен для Ubuntu. Обнаружено: ${PRETTY_NAME:-unknown}"
 fi
 
-case "${VERSION_ID:-}" in
-    22.04|24.04)
-        info "Ubuntu ${VERSION_ID} detected."
-        ;;
-    *)
-        warn "Ubuntu ${VERSION_ID:-unknown} detected."
-        warn "Primary supported versions are 22.04 and 24.04."
-        ;;
-esac
+echo "Ubuntu ${VERSION_ID}"
 
+# ------------------------------------------------------------
+# System packages
+# ------------------------------------------------------------
 
-# =============================================================================
-# System dependencies
-# =============================================================================
-
-log "Installing system dependencies"
+log "Установка системных зависимостей"
 
 apt-get update
 
@@ -178,36 +68,34 @@ apt-get install -y \
     git \
     gnupg \
     openssl \
-    jq \
-    lsb-release \
-    apt-transport-https
+    python3 \
+    python3-pip \
+    python3-venv \
+    lsb-release
 
-
-# =============================================================================
+# ------------------------------------------------------------
 # Docker
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Installing Docker"
+log "Проверка Docker"
 
 if ! command -v docker >/dev/null 2>&1; then
 
-    info "Docker not found. Installing..."
+    echo "Docker не установлен. Устанавливаю..."
 
     install -m 0755 -d /etc/apt/keyrings
 
-    if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
-        curl -fsSL \
-            https://download.docker.com/linux/ubuntu/gpg \
-            -o /etc/apt/keyrings/docker.asc
+    curl -fsSL \
+        https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc
 
-        chmod a+r /etc/apt/keyrings/docker.asc
-    fi
+    chmod a+r /etc/apt/keyrings/docker.asc
 
     ARCH="$(dpkg --print-architecture)"
 
-    cat > /etc/apt/sources.list.d/docker.list <<EOF
-deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable
-EOF
+    echo \
+        "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list
 
     apt-get update
 
@@ -217,59 +105,49 @@ EOF
         containerd.io \
         docker-buildx-plugin \
         docker-compose-plugin
-
-else
-    info "Docker already installed."
 fi
-
 
 systemctl enable docker
 systemctl start docker
 
-systemctl is-active --quiet docker \
-    || die "Docker daemon is not running."
-
-docker info >/dev/null 2>&1 \
-    || die "Cannot communicate with Docker daemon."
+docker info >/dev/null 2>&1 || die "Docker daemon не запущен"
 
 docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin is unavailable."
+    || die "Docker Compose plugin не найден"
 
-info "$(docker --version)"
-info "$(docker compose version)"
+echo "Docker: $(docker --version)"
+echo "Compose: $(docker compose version)"
 
-
-# =============================================================================
-# Environment functions
-# =============================================================================
+# ------------------------------------------------------------
+# Environment helpers
+# ------------------------------------------------------------
 
 get_env() {
     local key="$1"
 
-    [[ -f "${ENV_FILE}" ]] || return 1
+    if [[ ! -f "$ENV_FILE" ]]; then
+        return 1
+    fi
 
-    grep -E "^${key}=" "${ENV_FILE}" \
+    grep -E "^${key}=" "$ENV_FILE" \
         | tail -n 1 \
         | cut -d '=' -f 2-
 }
-
 
 set_env() {
     local key="$1"
     local value="$2"
 
-    if grep -qE "^${key}=" "${ENV_FILE}"; then
-        sed -i "s|^${key}=.*$|${key}=${value}|" "${ENV_FILE}"
+    if grep -qE "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*$|${key}=${value}|" "$ENV_FILE"
     else
-        echo "${key}=${value}" >> "${ENV_FILE}"
+        echo "${key}=${value}" >> "$ENV_FILE"
     fi
 }
-
 
 generate_secret() {
     openssl rand -hex 32
 }
-
 
 generate_fernet_key() {
     python3 - <<'PY'
@@ -280,356 +158,287 @@ print(base64.urlsafe_b64encode(os.urandom(32)).decode())
 PY
 }
 
-
-# =============================================================================
+# ------------------------------------------------------------
 # .env
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Configuring environment"
+log "Настройка .env"
 
-if [[ ! -f "${ENV_FILE}" ]]; then
-
-    info "Creating ${ENV_FILE}"
+if [[ ! -f "$ENV_FILE" ]]; then
 
     POSTGRES_PASSWORD="$(generate_secret)"
     INTERNAL_API_KEY="$(generate_secret)"
     ENCRYPTION_KEY="$(generate_fernet_key)"
 
-    cat > "${ENV_FILE}" <<EOF
-# =============================================================================
-# VPN-3X
-# Generated automatically by install.sh
-# =============================================================================
-
+    cat > "$ENV_FILE" <<EOF
 POSTGRES_USER=vpn3x
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 POSTGRES_DB=vpn3x
 
 DATABASE_URL=postgresql+asyncpg://vpn3x:${POSTGRES_PASSWORD}@db:5432/vpn3x
-
 REDIS_URL=redis://redis:6379/0
 
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
-
 INTERNAL_API_KEY=${INTERNAL_API_KEY}
 
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_IDS=
 EOF
 
-    chmod 600 "${ENV_FILE}"
+    chmod 600 "$ENV_FILE"
+
+    echo ".env создан"
 
 else
-    info "${ENV_FILE} already exists."
-    info "Existing secrets will be preserved."
+
+    echo ".env уже существует — существующие значения сохраняются"
+
 fi
 
+# ------------------------------------------------------------
+# Required environment
+# ------------------------------------------------------------
 
-# =============================================================================
-# Database configuration
-# =============================================================================
-
-log "Configuring database"
+log "Проверка переменных окружения"
 
 POSTGRES_USER="$(get_env POSTGRES_USER || true)"
 POSTGRES_PASSWORD="$(get_env POSTGRES_PASSWORD || true)"
 POSTGRES_DB="$(get_env POSTGRES_DB || true)"
 
-[[ -n "${POSTGRES_USER}" ]] \
-    || set_env POSTGRES_USER "vpn3x"
+if [[ -z "$POSTGRES_USER" ]]; then
+    set_env POSTGRES_USER "vpn3x"
+    POSTGRES_USER="vpn3x"
+fi
 
-[[ -n "${POSTGRES_DB}" ]] \
-    || set_env POSTGRES_DB "vpn3x"
+if [[ -z "$POSTGRES_DB" ]]; then
+    set_env POSTGRES_DB "vpn3x"
+    POSTGRES_DB="vpn3x"
+fi
 
-if [[ -z "${POSTGRES_PASSWORD}" ]]; then
+if [[ -z "$POSTGRES_PASSWORD" ]]; then
     POSTGRES_PASSWORD="$(generate_secret)"
-    set_env POSTGRES_PASSWORD "${POSTGRES_PASSWORD}"
+    set_env POSTGRES_PASSWORD "$POSTGRES_PASSWORD"
 fi
-
-POSTGRES_USER="$(get_env POSTGRES_USER)"
-POSTGRES_PASSWORD="$(get_env POSTGRES_PASSWORD)"
-POSTGRES_DB="$(get_env POSTGRES_DB)"
-
-
-# =============================================================================
-# Application secrets
-# =============================================================================
-
-INTERNAL_API_KEY="$(get_env INTERNAL_API_KEY || true)"
-
-if [[ -z "${INTERNAL_API_KEY}" ]]; then
-    INTERNAL_API_KEY="$(generate_secret)"
-    set_env INTERNAL_API_KEY "${INTERNAL_API_KEY}"
-fi
-
-
-ENCRYPTION_KEY="$(get_env ENCRYPTION_KEY || true)"
-
-if [[ -z "${ENCRYPTION_KEY}" ]]; then
-    ENCRYPTION_KEY="$(generate_fernet_key)"
-    set_env ENCRYPTION_KEY "${ENCRYPTION_KEY}"
-fi
-
-
-# =============================================================================
-# Internal Docker URLs
-# =============================================================================
 
 set_env \
     DATABASE_URL \
     "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
 
-set_env \
-    REDIS_URL \
-    "redis://redis:6379/0"
+set_env REDIS_URL "redis://redis:6379/0"
 
+if [[ -z "$(get_env ENCRYPTION_KEY || true)" ]]; then
+    set_env ENCRYPTION_KEY "$(generate_fernet_key)"
+fi
 
-# =============================================================================
+if [[ -z "$(get_env INTERNAL_API_KEY || true)" ]]; then
+    set_env INTERNAL_API_KEY "$(generate_secret)"
+fi
+
+# ------------------------------------------------------------
 # Telegram
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Telegram configuration"
+log "Настройка Telegram"
 
 TELEGRAM_BOT_TOKEN="$(get_env TELEGRAM_BOT_TOKEN || true)"
 TELEGRAM_ADMIN_IDS="$(get_env TELEGRAM_ADMIN_IDS || true)"
 
+if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
 
-if [[ -z "${TELEGRAM_BOT_TOKEN}" ]]; then
+    read -r -p "Введите TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
 
-    echo
-    echo "Enter Telegram Bot Token."
-    echo
+    [[ -n "$TELEGRAM_BOT_TOKEN" ]] \
+        || die "TELEGRAM_BOT_TOKEN не может быть пустым"
 
-    read -r -p "TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
-
-    [[ -n "${TELEGRAM_BOT_TOKEN}" ]] \
-        || die "TELEGRAM_BOT_TOKEN cannot be empty."
-
-    set_env TELEGRAM_BOT_TOKEN "${TELEGRAM_BOT_TOKEN}"
+    set_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
 fi
 
+if [[ -z "$TELEGRAM_ADMIN_IDS" ]]; then
 
-if [[ -z "${TELEGRAM_ADMIN_IDS}" ]]; then
+    read -r -p "Введите TELEGRAM_ADMIN_IDS: " TELEGRAM_ADMIN_IDS
 
-    echo
-    echo "Enter Telegram administrator ID(s)."
-    echo "Multiple IDs: 123456789,987654321"
-    echo
+    [[ -n "$TELEGRAM_ADMIN_IDS" ]] \
+        || die "TELEGRAM_ADMIN_IDS не может быть пустым"
 
-    read -r -p "TELEGRAM_ADMIN_IDS: " TELEGRAM_ADMIN_IDS
-
-    [[ -n "${TELEGRAM_ADMIN_IDS}" ]] \
-        || die "TELEGRAM_ADMIN_IDS cannot be empty."
-
-    set_env TELEGRAM_ADMIN_IDS "${TELEGRAM_ADMIN_IDS}"
+    set_env TELEGRAM_ADMIN_IDS "$TELEGRAM_ADMIN_IDS"
 fi
 
+chmod 600 "$ENV_FILE"
 
-chmod 600 "${ENV_FILE}"
-
-
-# =============================================================================
+# ------------------------------------------------------------
 # Validate Compose
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Validating Docker Compose"
+log "Проверка Docker Compose"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
     config >/dev/null
 
-info "Compose configuration is valid."
+echo "docker-compose.yml корректен"
 
+# ------------------------------------------------------------
+# Stop old containers
+# ------------------------------------------------------------
 
-# =============================================================================
-# Stop old installation
-# =============================================================================
-
-log "Stopping existing VPN-3X stack"
+log "Остановка старого контейнерного стека"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
     down --remove-orphans || true
 
+# ------------------------------------------------------------
+# Pull images
+# ------------------------------------------------------------
 
-# =============================================================================
-# Pull infrastructure
-# =============================================================================
-
-log "Pulling PostgreSQL and Redis"
+log "Загрузка PostgreSQL и Redis"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
-    pull \
-    "${POSTGRES_SERVICE}" \
-    "${REDIS_SERVICE}"
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    pull db redis
 
-
-# =============================================================================
+# ------------------------------------------------------------
 # Build application
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Building application containers"
-
-docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
-    build --pull \
-    "${SERVER_SERVICE}" \
-    "${WORKER_SERVICE}" \
-    "${BOT_SERVICE}"
-
-
-# =============================================================================
-# Start database and Redis
-# =============================================================================
-
-log "Starting PostgreSQL and Redis"
+log "Сборка server / worker / bot"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
-    up -d \
-    "${POSTGRES_SERVICE}" \
-    "${REDIS_SERVICE}"
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    build --pull server worker bot
 
+# ------------------------------------------------------------
+# Start database
+# ------------------------------------------------------------
 
-# =============================================================================
+log "Запуск PostgreSQL и Redis"
+
+docker compose \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    up -d db redis
+
+# ------------------------------------------------------------
 # Wait for PostgreSQL
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Waiting for PostgreSQL"
+log "Ожидание PostgreSQL"
 
 POSTGRES_READY=0
 
 for i in $(seq 1 60); do
 
     if docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        exec -T "${POSTGRES_SERVICE}" \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        exec -T db \
         pg_isready \
-        -U "${POSTGRES_USER}" \
-        -d "${POSTGRES_DB}" \
+        -U "$POSTGRES_USER" \
+        -d "$POSTGRES_DB" \
         >/dev/null 2>&1
     then
         POSTGRES_READY=1
         break
     fi
 
-    info "Waiting for PostgreSQL (${i}/60)..."
+    echo "PostgreSQL ещё не готов (${i}/60)"
     sleep 2
 done
 
-[[ "${POSTGRES_READY}" -eq 1 ]] \
-    || die "PostgreSQL did not become ready."
+if [[ "$POSTGRES_READY" -ne 1 ]]; then
 
+    docker compose \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        logs --tail=100 db
 
-# =============================================================================
-# Build server image
-#
-# This image contains:
-#   Python 3.12
-#   server requirements
-#   app/
-#
-# It will also be reused for migrations.
-# =============================================================================
+    die "PostgreSQL не запустился"
+fi
 
-log "Starting server"
+echo "PostgreSQL готов"
 
-docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
-    up -d \
-    "${SERVER_SERVICE}"
+# ------------------------------------------------------------
+# Start server
+# ------------------------------------------------------------
 
-
-# =============================================================================
-# Wait for server
-# =============================================================================
-
-log "Waiting for server"
-
-for i in $(seq 1 60); do
-
-    SERVER_CONTAINER="$(
-        docker compose \
-            --env-file "${ENV_FILE}" \
-            -f "${COMPOSE_FILE}" \
-            ps -q "${SERVER_SERVICE}"
-    )"
-
-    if [[ -n "${SERVER_CONTAINER}" ]]; then
-
-        STATUS="$(
-            docker inspect \
-                --format '{{.State.Status}}' \
-                "${SERVER_CONTAINER}" \
-                2>/dev/null || true
-        )
-
-        if [[ "${STATUS}" == "running" ]]; then
-            break
-        fi
-    fi
-
-    info "Waiting for server container (${i}/60)..."
-    sleep 2
-
-done
-
-
-# =============================================================================
-# Run migrations
-#
-# migrations/ is mounted into the server container.
-#
-# Container:
-#
-#   /app       -> server/
-#   /migrations -> migrations/
-#
-# migrations/env.py adds ../server to sys.path, so app imports work.
-# =============================================================================
-
-log "Running Alembic migrations"
+log "Запуск API server"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    up -d server
+
+# ------------------------------------------------------------
+# Wait for server container
+# ------------------------------------------------------------
+
+sleep 5
+
+SERVER_CONTAINER="$(
+    docker compose \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        ps -q server
+)"
+
+if [[ -z "$SERVER_CONTAINER" ]]; then
+    die "Контейнер server не создан"
+fi
+
+SERVER_STATUS="$(
+    docker inspect \
+        --format '{{.State.Status}}' \
+        "$SERVER_CONTAINER"
+)"
+
+if [[ "$SERVER_STATUS" != "running" ]]; then
+
+    docker compose \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        logs --tail=150 server
+
+    die "Контейнер server не запущен"
+fi
+
+# ------------------------------------------------------------
+# Alembic migrations
+# ------------------------------------------------------------
+
+log "Запуск миграций базы данных"
+
+docker compose \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
     run \
     --rm \
     --no-deps \
-    -v "${APP_DIR}/migrations:/migrations:ro" \
-    "${SERVER_SERVICE}" \
-    alembic \
-    -c /migrations/alembic.ini \
-    upgrade head
+    -v "${APP_DIR}:/workspace:ro" \
+    server \
+    sh -c 'cd /workspace/migrations && alembic -c alembic.ini upgrade head'
 
+echo "Миграции успешно выполнены"
 
-# =============================================================================
+# ------------------------------------------------------------
 # Start worker and bot
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Starting worker and bot"
+log "Запуск worker и bot"
 
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
-    up -d \
-    "${WORKER_SERVICE}" \
-    "${BOT_SERVICE}"
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    up -d worker bot
 
+# ------------------------------------------------------------
+# API health check
+# ------------------------------------------------------------
 
-# =============================================================================
-# Wait for API
-# =============================================================================
-
-log "Checking API"
+log "Проверка API"
 
 API_READY=0
 
@@ -639,113 +448,105 @@ for i in $(seq 1 60); do
         --silent \
         --show-error \
         --fail \
-        "${HEALTH_URL}" \
+        http://127.0.0.1:8000/health \
         >/dev/null 2>&1
     then
         API_READY=1
         break
     fi
 
-    info "Waiting for API (${i}/60)..."
+    echo "API ещё не готов (${i}/60)"
     sleep 2
 done
 
-
-if [[ "${API_READY}" -ne 1 ]]; then
+if [[ "$API_READY" -ne 1 ]]; then
 
     echo
     echo "================ SERVER LOGS ================"
-    docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        logs --tail=150 "${SERVER_SERVICE}" || true
 
-    echo
-    echo "================ ALL SERVICES ================"
     docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        ps || true
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        logs --tail=150 server
 
-    die "API health check failed."
+    die "API health check не пройден"
 fi
 
+echo "API работает"
 
-# =============================================================================
+# ------------------------------------------------------------
 # Check worker
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Checking worker"
+log "Проверка worker"
 
 WORKER_CONTAINER="$(
     docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        ps -q "${WORKER_SERVICE}"
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        ps -q worker
 )"
 
-if [[ -z "${WORKER_CONTAINER}" ]]; then
-    die "Worker container was not created."
-fi
+[[ -n "$WORKER_CONTAINER" ]] \
+    || die "Worker контейнер не создан"
 
 WORKER_STATUS="$(
     docker inspect \
         --format '{{.State.Status}}' \
-        "${WORKER_CONTAINER}"
-)
+        "$WORKER_CONTAINER"
+)"
 
-if [[ "${WORKER_STATUS}" != "running" ]]; then
+if [[ "$WORKER_STATUS" != "running" ]]; then
+
     docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        logs --tail=100 "${WORKER_SERVICE}" || true
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        logs --tail=100 worker
 
-    die "Worker is not running."
+    die "Worker не запущен"
 fi
 
-
-# =============================================================================
+# ------------------------------------------------------------
 # Check bot
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Checking Telegram bot"
+log "Проверка bot"
 
 BOT_CONTAINER="$(
     docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        ps -q "${BOT_SERVICE}"
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        ps -q bot
 )"
 
-if [[ -z "${BOT_CONTAINER}" ]]; then
-    die "Bot container was not created."
-fi
+[[ -n "$BOT_CONTAINER" ]] \
+    || die "Bot контейнер не создан"
 
 BOT_STATUS="$(
     docker inspect \
         --format '{{.State.Status}}' \
-        "${BOT_CONTAINER}"
-)
+        "$BOT_CONTAINER"
+)"
 
-if [[ "${BOT_STATUS}" != "running" ]]; then
+if [[ "$BOT_STATUS" != "running" ]]; then
+
     docker compose \
-        --env-file "${ENV_FILE}" \
-        -f "${COMPOSE_FILE}" \
-        logs --tail=100 "${BOT_SERVICE}" || true
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        logs --tail=100 bot
 
-    die "Bot is not running."
+    die "Bot не запущен"
 fi
 
-
-# =============================================================================
+# ------------------------------------------------------------
 # Systemd
-# =============================================================================
+# ------------------------------------------------------------
 
-log "Installing systemd service"
+log "Настройка автозапуска"
 
 cat > /etc/systemd/system/vpn-3x.service <<EOF
 [Unit]
-Description=VPN-3X Docker Stack
+Description=VPN-3X
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -753,7 +554,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-
 WorkingDirectory=${APP_DIR}
 
 ExecStart=/usr/bin/docker compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} up -d
@@ -766,75 +566,51 @@ TimeoutStopSec=120
 WantedBy=multi-user.target
 EOF
 
-
 systemctl daemon-reload
 systemctl enable vpn-3x.service
 
+# ------------------------------------------------------------
+# Final status
+# ------------------------------------------------------------
 
-# =============================================================================
-# Final verification
-# =============================================================================
+log "Финальная проверка"
 
-log "Final verification"
-
-echo
-echo "Docker containers:"
 docker compose \
-    --env-file "${ENV_FILE}" \
-    -f "${COMPOSE_FILE}" \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
     ps
 
 echo
 echo "API:"
-curl -fsS "${HEALTH_URL}"
+curl -fsS http://127.0.0.1:8000/health
 
 echo
 echo
-echo "Systemd:"
-systemctl is-enabled vpn-3x.service
-
+echo "============================================================"
+echo "VPN-3X УСПЕШНО УСТАНОВЛЕН"
+echo "============================================================"
 echo
-echo "================================================================"
-echo "VPN-3X INSTALLED SUCCESSFULLY"
-echo "================================================================"
+echo "Каталог:"
+echo "  $APP_DIR"
 echo
-echo "Directory:"
-echo "  ${APP_DIR}"
-echo
-echo "Environment:"
-echo "  ${ENV_FILE}"
+echo "Конфигурация:"
+echo "  $ENV_FILE"
 echo
 echo "API:"
-echo "  ${HEALTH_URL}"
+echo "  http://127.0.0.1:8000/health"
 echo
-echo "Service:"
+echo "Systemd:"
 echo "  vpn-3x.service"
 echo
-echo "Useful commands:"
+echo "Команды:"
 echo
-echo "  cd ${APP_DIR}"
-echo
+echo "  cd $APP_DIR"
 echo "  docker compose ps"
-echo
 echo "  docker compose logs -f"
-echo
 echo "  docker compose logs -f server"
-echo
 echo "  docker compose logs -f worker"
-echo
 echo "  docker compose logs -f bot"
 echo
 echo "  systemctl status vpn-3x.service"
-echo
 echo "  systemctl restart vpn-3x.service"
-echo
-echo "  systemctl stop vpn-3x.service"
-echo
-echo "  systemctl start vpn-3x.service"
-echo
-echo "  curl ${HEALTH_URL}"
-echo
-echo "IMPORTANT:"
-echo "  ${ENV_FILE} contains secrets."
-echo "  Never commit .env to Git."
 echo
