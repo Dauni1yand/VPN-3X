@@ -111,15 +111,29 @@ async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession =
     await db.commit()
     await db.refresh(node)
 
-    queue = await get_queue()
-    await queue.enqueue_job(
-        "bootstrap_node_job",
-        node.id,
-        payload.ssh_user,
-        payload.ssh_port,
-        payload.ssh_password,
-        payload.ssh_private_key,
-    )
+    try:
+        queue = await get_queue()
+        await queue.enqueue_job(
+            "bootstrap_node_job",
+            node.id,
+            payload.ssh_user,
+            payload.ssh_port,
+            payload.ssh_password,
+            payload.ssh_private_key,
+        )
+    except Exception as exc:  # noqa: BLE001 -- queue unreachable, serialization, ...
+        # The row is already committed at this point, so without this it
+        # would sit in `provisioning` forever with no job to pick it up.
+        # Drop it and tell the caller what actually went wrong instead of
+        # letting this surface as a bare 500.
+        await db.delete(node)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"не удалось поставить установку в очередь ({type(exc).__name__}: {exc}). "
+            "Проверьте, что контейнер redis запущен: docker compose ps",
+        ) from exc
+
     return NodeOut.model_validate(node)
 
 
