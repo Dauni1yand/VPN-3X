@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.config import settings
 from bot.services.api_client import server_api
-from bot.services.cryptobot import cryptobot
+from bot.services.cryptobot import CryptoBotNotConfiguredError, cryptobot
 
 router = Router(name="user")
 
@@ -37,12 +37,16 @@ async def cmd_subscribe(message: Message) -> None:
     amount = await server_api.get_setting("subscription_price_amount")
     asset = await server_api.get_setting("subscription_price_asset")
 
-    invoice = await cryptobot.create_invoice(
-        amount=amount,
-        asset=asset,
-        description="VPN-3X подписка",
-        payload=f"{message.from_user.id}:{SUBSCRIPTION_PLAN_CODE}",
-    )
+    try:
+        invoice = await cryptobot.create_invoice(
+            amount=amount,
+            asset=asset,
+            description="VPN-3X подписка",
+            payload=f"{message.from_user.id}:{SUBSCRIPTION_PLAN_CODE}",
+        )
+    except CryptoBotNotConfiguredError:
+        await message.answer("Оплата пока недоступна, приём платежей ещё настраивается. Загляните позже.")
+        return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Оплатить", url=invoice["pay_url"])],

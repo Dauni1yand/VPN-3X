@@ -144,7 +144,7 @@ async def cmd_settings(message: Message) -> None:
     await message.answer(
         "\n".join(lines)
         + "\n\n/setprice <amount> <asset>\n/setaddurations <short_min> <long_min>\n"
-        "/setalertthreshold <n>\n/setsubduration <days>"
+        "/setalertthreshold <n>\n/setsubduration <days>\n/setcryptobottoken <token>"
     )
 
 
@@ -192,3 +192,25 @@ async def cmd_set_subscription_duration(message: Message) -> None:
         "subscription_duration_seconds", str(int(parts[1]) * 24 * 60 * 60), message.from_user.id
     )
     await message.answer(f"Длительность подписки: {parts[1]} дней")
+
+
+@router.message(Command("setcryptobottoken"))
+async def cmd_set_cryptobot_token(message: Message) -> None:
+    # Usage: /setcryptobottoken <token> -- token comes from @CryptoBot's
+    # "/pay" -> "Create App". Stored encrypted in the server's settings
+    # table (settings_store.py), not an env var, so it can be added or
+    # rotated without a redeploy.
+    parts = (message.text or "").split(maxsplit=1)
+    # Same reasoning as /bootstrap: this message carries a secret in
+    # plaintext, and a bot can delete the user's own message in a private
+    # chat -- scrub it regardless of whether the command was well-formed.
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001 -- best-effort scrub, never block on it
+        pass
+
+    if len(parts) != 2:
+        await message.answer("Использование: /setcryptobottoken <token>")
+        return
+    await server_api.set_setting("cryptobot_api_token", parts[1], message.from_user.id)
+    await message.answer("Токен CryptoBot сохранён.")

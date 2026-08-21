@@ -12,7 +12,10 @@ router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(
 
 @router.get("")
 async def list_settings(db: AsyncSession = Depends(get_db)) -> dict[str, str]:
-    return await get_all_settings(db)
+    # Masked here (the bot's human-facing /settings overview) -- the bot
+    # still gets the real CryptoBot token value through GET /settings/{key}
+    # when it actually needs to call CryptoBot with it.
+    return await get_all_settings(db, mask_secrets=True)
 
 
 @router.get("/{key}")

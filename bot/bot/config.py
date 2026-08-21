@@ -7,7 +7,6 @@ class Settings(BaseSettings):
     bot_token: str
     server_api_url: str
     internal_api_key: str
-    cryptobot_api_token: str = ""
 
     # Comma-separated Telegram user IDs allowed to use the admin menu.
     bot_admin_ids: str = ""

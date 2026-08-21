@@ -36,7 +36,7 @@ async def cryptobot_webhook(
     )
 
     raw_body = await request.body()
-    if not verify_webhook_signature(raw_body, signature):
+    if not await verify_webhook_signature(raw_body, signature, db):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad signature")
 
     body = await request.json()
