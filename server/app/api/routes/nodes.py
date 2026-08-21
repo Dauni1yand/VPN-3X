@@ -156,7 +156,9 @@ async def provision_inbound(node_id: str, admin_telegram_id: int, db: AsyncSessi
 
     inbound = await provision_default_inbound(node)
     db.add(inbound)
+    node.sni = inbound.sni
     node.status = NodeStatus.active
+    node.consecutive_failures = 0
     node.consecutive_failures = 0
     log_admin_action(db, admin_telegram_id=admin_telegram_id, action="provision_inbound", target=node.id)
     await db.commit()
@@ -183,6 +185,7 @@ async def rotate_sni(node_id: str, admin_telegram_id: int, db: AsyncSession = De
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node has no inbound to rotate")
 
     inbound.sni = await rotate_inbound_sni(node, inbound)
+    node.sni = inbound.sni
     log_admin_action(db, admin_telegram_id=admin_telegram_id, action="rotate_sni", target=node.id, details=inbound.sni)
     await db.commit()
     await db.refresh(inbound)
