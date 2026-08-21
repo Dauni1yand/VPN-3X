@@ -22,15 +22,22 @@ DEFAULTS: dict[str, str] = {
     # Set via the bot's /setcryptobottoken, not an env var -- see
     # bot/handlers/admin.py. Empty means "not configured yet".
     "cryptobot_api_token": "",
+    # Cloudflare account-level config, set via /setcloudflaretoken and
+    # /setcloudflarezone -- see app/services/cloudflare.py and
+    # bot/handlers/admin.py's /connectcloudflare.
+    "cloudflare_api_token": "",
+    "cloudflare_zone_id": "",
 }
 
 # Encrypted at rest (same Fernet key as node panel passwords), unlike the
 # plain-text settings above. Still readable in full via get_setting/
 # get_all_settings by anyone who already holds the internal API key (the
-# bot needs the real value to call CryptoBot) -- the encryption is about
-# what sits in the database, not a second access-control layer on top of
-# the internal API key.
-_SECRET_KEYS = {"cryptobot_api_token"}
+# bot needs the real value to call CryptoBot/Cloudflare) -- the encryption
+# is about what sits in the database, not a second access-control layer on
+# top of the internal API key. cloudflare_zone_id is NOT in here: it's an
+# identifier visible on the Cloudflare dashboard to anyone with access to
+# the zone, not a credential on its own.
+_SECRET_KEYS = {"cryptobot_api_token", "cloudflare_api_token"}
 
 
 async def get_setting(db: AsyncSession, key: str) -> str:

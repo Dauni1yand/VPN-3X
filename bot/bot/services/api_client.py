@@ -121,6 +121,17 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def connect_cloudflare(
+        self, record_name: str, server_ip: str | None, admin_telegram_id: int
+    ) -> dict:
+        resp = await self._http.post(
+            "/cloudflare/connect",
+            json={"record_name": record_name, "server_ip": server_ip, "admin_telegram_id": admin_telegram_id},
+            timeout=30,  # a few outbound calls to Cloudflare's API in sequence
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def grant_ad_view(self, telegram_id: int, ad_type: str, provider_impression_id: str) -> dict:
         resp = await self._http.post(
             "/subscriptions/ad-view",

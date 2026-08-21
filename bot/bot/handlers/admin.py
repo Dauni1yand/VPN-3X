@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import httpx
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -144,7 +145,9 @@ async def cmd_settings(message: Message) -> None:
     await message.answer(
         "\n".join(lines)
         + "\n\n/setprice <amount> <asset>\n/setaddurations <short_min> <long_min>\n"
-        "/setalertthreshold <n>\n/setsubduration <days>\n/setcryptobottoken <token>"
+        "/setalertthreshold <n>\n/setsubduration <days>\n/setcryptobottoken <token>\n"
+        "/setcloudflaretoken <token>\n/setcloudflarezone <zone_id>\n"
+        "/connectcloudflare <record_name> [server_ip]"
     )
 
 
@@ -214,3 +217,68 @@ async def cmd_set_cryptobot_token(message: Message) -> None:
         return
     await server_api.set_setting("cryptobot_api_token", parts[1], message.from_user.id)
     await message.answer("Токен CryptoBot сохранён.")
+
+
+@router.message(Command("setcloudflaretoken"))
+async def cmd_set_cloudflare_token(message: Message) -> None:
+    # Usage: /setcloudflaretoken <token> -- a Cloudflare API TOKEN (not the
+    # legacy Global API Key), scoped to Zone.DNS:Edit + Zone.Zone
+    # Settings:Edit for the zone you'll connect. Create one at
+    # https://dash.cloudflare.com/profile/api-tokens
+    parts = (message.text or "").split(maxsplit=1)
+    try:
+        await message.delete()  # carries a secret in plaintext, same as /setcryptobottoken
+    except Exception:  # noqa: BLE001 -- best-effort scrub, never block on it
+        pass
+
+    if len(parts) != 2:
+        await message.answer("Использование: /setcloudflaretoken <token>")
+        return
+    await server_api.set_setting("cloudflare_api_token", parts[1], message.from_user.id)
+    await message.answer("Токен Cloudflare сохранён.")
+
+
+@router.message(Command("setcloudflarezone"))
+async def cmd_set_cloudflare_zone(message: Message) -> None:
+    # Usage: /setcloudflarezone <zone_id> -- found on the domain's Overview
+    # page in the Cloudflare dashboard. Not a secret on its own (visible to
+    # anyone with dashboard access to the zone), so no need to scrub the
+    # message the way the API token commands do.
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Использование: /setcloudflarezone <zone_id>")
+        return
+    await server_api.set_setting("cloudflare_zone_id", parts[1], message.from_user.id)
+    await message.answer("Zone ID Cloudflare сохранён.")
+
+
+@router.message(Command("connectcloudflare"))
+async def cmd_connect_cloudflare(message: Message) -> None:
+    # Usage: /connectcloudflare <record_name> [server_ip] -- points
+    # record_name at this server through Cloudflare (proxied A record +
+    # SSL mode). server_ip is auto-detected if omitted. Needs
+    # /setcloudflaretoken and /setcloudflarezone to have been run first.
+    # README: put the main server behind Cloudflare CDN; this only does the
+    # DNS/SSL half -- the optional firewall lock-down needs actual host
+    # access and stays a script run on the server itself, see
+    # scripts/setup_cloudflare.sh.
+    parts = (message.text or "").split(maxsplit=2)[1:]
+    if len(parts) not in (1, 2):
+        await message.answer("Использование: /connectcloudflare <record_name> [server_ip]")
+        return
+    record_name, *rest = parts
+    server_ip = rest[0] if rest else None
+
+    status_msg = await message.answer("Подключаю Cloudflare...")
+    try:
+        result = await server_api.connect_cloudflare(record_name, server_ip, message.from_user.id)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.json().get("detail", exc.response.text) if exc.response.text else str(exc)
+        await status_msg.edit_text(f"Не получилось: {detail}")
+        return
+
+    await status_msg.edit_text(
+        f"Готово: {result['record_name']} -> {result['server_ip']} "
+        f"(зона {result['zone_name']}, проксировано: {'да' if result['proxied'] else 'нет'}).\n"
+        "DNS может обновляться несколько минут."
+    )
