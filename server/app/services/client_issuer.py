@@ -60,14 +60,24 @@ async def issue_client(
         # Etap 1 (node auto-provisioning) is what's supposed to guarantee this.
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="node has no inbound provisioned")
 
+    
     client_uuid = str(uuid.uuid4())
-    email = f"{telegram_id}-{client_uuid[:8]}"
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+
+    email = (
+    f"{telegram_id}-"
+    f"{client_uuid[:8]}"
+)
+
+    expires_at = (
+    datetime.now(timezone.utc)
+    + timedelta(seconds=duration_seconds)
+)
 
     threexui = get_pooled_client(node)
+
     await threexui.add_client(
-    inbound_id=inbound.remote_inbound_id,
-    client={
+        inbound_id=inbound.remote_inbound_id,
+        client={
         "id": client_uuid,
         "email": email,
         "flow": "xtls-rprx-vision",
@@ -85,9 +95,22 @@ async def issue_client(
         email=email,
         status=ClientStatus.active,
         expires_at=expires_at,
-    )
+)
+
     db.add(client)
+
     await db.flush()
 
-    vless_uri = build_vless_uri(node, inbound, client_uuid, remark="vpn-3x")
-    return ClientOut(id=client.id, status=client.status, expires_at=client.expires_at, vless_uri=vless_uri)
+    vless_uri = build_vless_uri(
+        node,
+        inbound,
+        client_uuid,
+        remark="vpn-3x",
+)
+
+    return ClientOut(
+        id=client.id,
+        status=client.status,
+        expires_at=client.expires_at,
+        vless_uri=vless_uri,
+)
