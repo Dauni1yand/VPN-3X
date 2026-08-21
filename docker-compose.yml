@@ -5,8 +5,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
+    # Deliberately NOT published to the host: only the compose network
+    # needs Postgres, and install.sh runs migrations inside a container.
+    # Publishing it exposed the database to the internet on a box without
+    # a firewall.
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +19,8 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
+    # Not published either -- same reason as Postgres above, and the queue
+    # now carries node SSH credentials between the API and the worker.
 
   server:
     build: ./server

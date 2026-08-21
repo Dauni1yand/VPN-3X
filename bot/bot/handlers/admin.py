@@ -311,12 +311,6 @@ async def _run_bootstrap(
     message: Message, state: FSMContext, country: str | None, admin_id: int
 ) -> None:
     data = await state.get_data()
-    await _panel(
-        message,
-        state,
-        f"⏳ Устанавливаю 3x-ui на <code>{data['ip']}</code> и настраиваю REALITY.\n\n"
-        "Это займёт пару минут, не закрывайте чат...",
-    )
     try:
         node = await server_api.bootstrap_node(
             data["name"], data["ip"], data["ssh_password"], country, admin_id
@@ -330,10 +324,12 @@ async def _run_bootstrap(
     await _finish(
         message,
         state,
-        f"✅ <b>Нода готова и раздаёт VPN</b>\n\n"
-        f"Название: {html.escape(node['name'])}\n"
-        f"IP: <code>{node['ip']}</code>\n"
-        f"Статус: <b>{node['status']}</b>",
+        f"🚀 <b>Установка запущена</b>\n\n"
+        f"Нода: {html.escape(node['name'])}\n"
+        f"IP: <code>{node['ip']}</code>\n\n"
+        "Она уже видна в списке со статусом 🟡. Установка 3x-ui занимает "
+        "несколько минут — я пришлю отдельное сообщение, когда нода "
+        "заработает или если что-то пойдёт не так. Чат можно закрыть.",
         "a:nodes",
     )
 

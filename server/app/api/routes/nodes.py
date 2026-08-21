@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import secrets
+
 from app.api.deps import require_internal_api_key
 from app.core.security import encrypt_secret
 from app.db.models import Inbound, Node, NodeStatus
@@ -9,8 +11,9 @@ from app.db.session import get_db
 from app.schemas.inbounds import InboundOut
 from app.schemas.nodes import NodeBootstrapRequest, NodeCreate, NodeCredentialsUpdate, NodeOut
 from app.services.audit import log_admin_action
-from app.services.node_bootstrap import NodeBootstrapError, bootstrap_node
+from app.services.node_bootstrap import PANEL_PORT
 from app.services.node_provisioner import provision_default_inbound, rotate_inbound_sni
+from app.services.queue import get_queue
 
 router = APIRouter(prefix="/nodes", tags=["nodes"], dependencies=[Depends(require_internal_api_key)])
 
@@ -74,44 +77,50 @@ async def delete_node(node_id: str, admin_telegram_id: int, db: AsyncSession = D
     await db.commit()
 
 
-@router.post("/bootstrap", response_model=NodeOut, status_code=status.HTTP_201_CREATED)
-async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession = Depends(get_db)) -> Node:
-    """Goes all the way from a bare Ubuntu VPS to a serving VLESS node in
-    one call: SSHes in, installs 3x-ui, sets our own panel credentials,
-    then provisions the REALITY inbound on it (README: "настраивать с нуля
-    ноды"). SSH credentials are only used transiently here -- never
-    persisted, unlike the panel credentials this generates."""
+@router.post("/bootstrap", response_model=NodeOut, status_code=status.HTTP_202_ACCEPTED)
+async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession = Depends(get_db)) -> NodeOut:
+    """Kicks off "bare Ubuntu VPS -> serving VLESS node" and returns
+    straight away with the node in `provisioning`.
 
-    try:
-        panel_login, panel_password, panel_port = await bootstrap_node(
-            ssh_host=payload.ip,
-            ssh_user=payload.ssh_user,
-            ssh_port=payload.ssh_port,
-            ssh_password=payload.ssh_password,
-            ssh_private_key=payload.ssh_private_key,
-        )
-    except NodeBootstrapError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    The install itself (apt + the 3x-ui installer over SSH) takes minutes,
+    so it runs in the worker rather than in this request: holding the
+    request open for that long meant the caller's HTTP client timed out
+    before the work finished and the admin was left guessing. The node is
+    visible in the list immediately, flips to `active` when the worker
+    finishes, and the admin is notified either way.
+
+    SSH credentials are passed to the job and never persisted; only the
+    panel credentials generated here are stored (encrypted)."""
+
+    panel_login = "admin"
+    panel_password = secrets.token_urlsafe(24)
 
     node = Node(
         name=payload.name,
         ip=payload.ip,
-        panel_base_url=f"http://{payload.ip}:{panel_port}",
+        panel_base_url=f"http://{payload.ip}:{PANEL_PORT}",
         panel_login=panel_login,
         panel_password_encrypted=encrypt_secret(panel_password),
         country=payload.country.upper() if payload.country else None,
+        status=NodeStatus.provisioning,
     )
     db.add(node)
-    await db.flush()  # assigns node.id, needed by provision_default_inbound
-
-    inbound = await provision_default_inbound(node)
-    db.add(inbound)
-    node.status = NodeStatus.active
+    await db.flush()
 
     log_admin_action(db, admin_telegram_id=payload.admin_telegram_id, action="bootstrap_node", target=node.id)
     await db.commit()
     await db.refresh(node)
-    return node
+
+    queue = await get_queue()
+    await queue.enqueue_job(
+        "bootstrap_node_job",
+        node.id,
+        payload.ssh_user,
+        payload.ssh_port,
+        payload.ssh_password,
+        payload.ssh_private_key,
+    )
+    return NodeOut.model_validate(node)
 
 
 @router.post("/{node_id}/inbound", response_model=InboundOut, status_code=status.HTTP_201_CREATED)

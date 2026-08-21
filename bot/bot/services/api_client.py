@@ -75,7 +75,8 @@ class ServerAPIClient:
                 "country": country,
                 "admin_telegram_id": admin_telegram_id,
             },
-            timeout=300,  # install.sh + apt update genuinely takes a while
+            # Returns as soon as the job is queued; the install itself runs
+            # in the worker, so no long client-side timeout is needed.
         )
         resp.raise_for_status()
         return resp.json()
