@@ -66,18 +66,17 @@ async def issue_client(
 
     threexui = get_pooled_client(node)
     await threexui.add_client(
-        inbound_id=inbound.remote_inbound_id,
-        client_settings={
-            "clients": [
-                {
-                    "id": client_uuid,
-                    "email": email,
-                    "flow": "xtls-rprx-vision",
-                    "expiryTime": int(expires_at.timestamp() * 1000),
-                }
-            ]
-        },
-    )
+    inbound_id=inbound.remote_inbound_id,
+    client={
+        "id": client_uuid,
+        "email": email,
+        "flow": "xtls-rprx-vision",
+        "expiryTime": int(
+            expires_at.timestamp() * 1000
+        ),
+        "enable": True,
+    },
+)
 
     client = Client(
         inbound_id=inbound.id,
