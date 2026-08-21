@@ -6,13 +6,68 @@ from __future__ import annotations
 import httpx
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
 from bot.services.api_client import server_api
 
 router = Router(name="admin")
 router.message.filter(lambda message: message.from_user.id in settings.admin_ids)
+
+_ADMIN_MENU = InlineKeyboardMarkup(
+    inline_keyboard=[
+        # Nodes
+        [
+            InlineKeyboardButton(text="📋 Список нод", switch_inline_query_current_chat="/nodes"),
+            InlineKeyboardButton(text="➕ Добавить ноду", switch_inline_query_current_chat="/addnode "),
+        ],
+        [
+            InlineKeyboardButton(text="🚀 Bootstrap ноды", switch_inline_query_current_chat="/bootstrap "),
+            InlineKeyboardButton(text="🗑 Удалить ноду", switch_inline_query_current_chat="/delnode "),
+        ],
+        [
+            InlineKeyboardButton(text="⚙️ Provision inbound", switch_inline_query_current_chat="/provision "),
+            InlineKeyboardButton(text="🔄 Сменить SNI", switch_inline_query_current_chat="/rotatesni "),
+        ],
+        # Clients
+        [
+            InlineKeyboardButton(text="🔑 Выдать конфиг", switch_inline_query_current_chat="/issueconfig "),
+            InlineKeyboardButton(text="🔀 Перенести клиента", switch_inline_query_current_chat="/migrate "),
+        ],
+        # Settings
+        [
+            InlineKeyboardButton(text="📊 Настройки", switch_inline_query_current_chat="/settings"),
+        ],
+        [
+            InlineKeyboardButton(text="💰 Цена подписки", switch_inline_query_current_chat="/setprice "),
+            InlineKeyboardButton(text="📅 Длит. подписки", switch_inline_query_current_chat="/setsubduration "),
+        ],
+        [
+            InlineKeyboardButton(text="📺 Длит. рекламы", switch_inline_query_current_chat="/setaddurations "),
+            InlineKeyboardButton(text="🚨 Порог алертов", switch_inline_query_current_chat="/setalertthreshold "),
+        ],
+        # Payments & integrations
+        [
+            InlineKeyboardButton(text="🤖 Токен CryptoBot", switch_inline_query_current_chat="/setcryptobottoken "),
+        ],
+        [
+            InlineKeyboardButton(text="☁️ Токен Cloudflare", switch_inline_query_current_chat="/setcloudflaretoken "),
+            InlineKeyboardButton(text="🌐 Zone Cloudflare", switch_inline_query_current_chat="/setcloudflarezone "),
+        ],
+        [
+            InlineKeyboardButton(text="🔗 Подключить CF", switch_inline_query_current_chat="/connectcloudflare "),
+        ],
+    ]
+)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    await message.answer(
+        "👑 <b>Панель администратора</b>\n\nВыберите действие:",
+        reply_markup=_ADMIN_MENU,
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("nodes"))
