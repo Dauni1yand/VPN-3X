@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from app.core.security import (
     decrypt_secret,
     encrypt_secret,
@@ -25,6 +27,34 @@ from app.services.sni_prober import (
 from app.services.threexui_client import (
     get_pooled_client,
 )
+
+
+class InboundPortInUseError(RuntimeError):
+    """The target port is held by an inbound that has users on it."""
+
+
+def _client_count(inbound: dict) -> int:
+    """How many clients an inbound from /panel/api/inbounds/list carries.
+
+    `settings` normally comes back as a nested object (Inbound.MarshalJSON
+    expands it on the way out) but falls back to a JSON string when the
+    stored text isn't valid JSON, so both shapes have to be handled.
+    """
+
+    settings = inbound.get("settings")
+
+    if isinstance(settings, str):
+        try:
+            settings = json.loads(settings)
+        except ValueError:
+            return 0
+
+    if not isinstance(settings, dict):
+        return 0
+
+    clients = settings.get("clients")
+
+    return len(clients) if isinstance(clients, list) else 0
 
 
 async def provision_default_inbound(
@@ -53,8 +83,58 @@ async def provision_default_inbound(
 
     threexui = get_pooled_client(node)
 
-    # First make sure authentication and the API itself work.
-    await threexui.list_inbounds()
+    # Doubles as a check that authentication and the API itself work.
+    existing_inbounds = await threexui.list_inbounds()
+
+    port = int(payload["port"])
+
+    # 3x-ui refuses to add an inbound onto a port another one already holds
+    # ("port 443 (tcp) already used by inbound 'in-443-tcp' (#1)"), and tcp/443
+    # is not negotiable for us -- it is the port the README pins REALITY to.
+    # A node that has been bootstrapped before, or that 3x-ui seeded itself,
+    # arrives with something already sitting there.
+    occupying = next(
+        (
+            candidate
+            for candidate in existing_inbounds
+            if isinstance(candidate, dict) and candidate.get("port") == port
+        ),
+        None,
+    )
+
+    if occupying is not None:
+        clients = _client_count(occupying)
+
+        if clients:
+            # Someone's users live on it. Overwriting would cut them off
+            # silently, so make the admin decide instead.
+            raise InboundPortInUseError(
+                f"port {port} on this node is already used by inbound "
+                f"{occupying.get('remark') or occupying.get('tag') or occupying.get('id')} "
+                f"which has {clients} client(s). Remove it in the 3x-ui panel "
+                f"first if this node should be managed by VPN-3X."
+            )
+
+        # Empty: a placeholder, or a leftover from an earlier bootstrap of
+        # this same box. Take it over in place rather than delete-then-create,
+        # which would leave the node with no inbound at all if the create leg
+        # failed.
+        remote_id = int(occupying["id"])
+        await threexui.update_inbound(remote_id, payload)
+
+        return Inbound(
+            node_id=node.id,
+            remote_inbound_id=remote_id,
+            protocol="vless",
+            transport="tcp",
+            port=port,
+            sni=sni,
+            reality_public_key=public_key,
+            reality_private_key_encrypted=(
+                encrypt_secret(private_key)
+            ),
+            reality_short_id=short_id,
+        )
 
     result = await threexui.add_inbound(
         payload

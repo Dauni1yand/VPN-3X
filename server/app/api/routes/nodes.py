@@ -12,7 +12,11 @@ from app.schemas.inbounds import InboundOut
 from app.schemas.nodes import NodeBootstrapRequest, NodeCreate, NodeCredentialsUpdate, NodeOut
 from app.services.audit import log_admin_action
 from app.services.node_bootstrap import PANEL_PORT
-from app.services.node_provisioner import provision_default_inbound, rotate_inbound_sni
+from app.services.node_provisioner import (
+    InboundPortInUseError,
+    provision_default_inbound,
+    rotate_inbound_sni,
+)
 from app.services.queue import get_queue
 
 router = APIRouter(prefix="/nodes", tags=["nodes"], dependencies=[Depends(require_internal_api_key)])
@@ -164,7 +168,14 @@ async def provision_inbound(node_id: str, admin_telegram_id: int, db: AsyncSessi
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="node already has an inbound")
 
-    inbound = await provision_default_inbound(node)
+    try:
+        inbound = await provision_default_inbound(node)
+    except InboundPortInUseError as exc:
+        # Someone's clients are on that port. Say so plainly rather than
+        # letting it surface as a generic 500 -- the admin has to clear it
+        # in the panel, and needs to know that.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
     db.add(inbound)
     node.sni = inbound.sni
     node.status = NodeStatus.active
