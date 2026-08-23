@@ -573,23 +573,27 @@ async def bootstrap_node(
             # Check panel port
             # --------------------------------------------------------
 
+            # Who holds the port matters, not merely whether it is held.
+            # Re-bootstrapping a node we already own is a normal thing to do,
+            # and on the second run our own panel from the first run is
+            # sitting right there -- refusing then would make a node
+            # impossible to reinstall without manual cleanup. The installer
+            # reconfigures an existing x-ui in place, so x-ui holding the
+            # port is not a conflict; anything else is.
             port_check = await conn.run(
-                (
-                    "ss -ltnH | "
-                    f"awk '$4 ~ /:{panel_port}$/ "
-                    "{{found=1}} "
-                    "END {{exit found ? 0 : 1}}'"
-                ),
+                f"ss -ltnpH 2>/dev/null | grep -E ':{panel_port}\\b' || true",
                 check=False,
                 timeout=15,
                 input="",
             )
 
-            if port_check.exit_status == 0:
+            holders = str(port_check.stdout or "").strip()
+
+            if holders and "x-ui" not in holders:
 
                 raise NodeBootstrapError(
-                    f"TCP port {panel_port} is already occupied "
-                    f"on {ssh_host}"
+                    f"TCP port {panel_port} on {ssh_host} is held by another "
+                    f"process, so 3x-ui cannot use it:\n{holders[-500:]}"
                 )
 
             # --------------------------------------------------------

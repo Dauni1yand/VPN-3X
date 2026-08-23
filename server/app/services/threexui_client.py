@@ -141,10 +141,19 @@ class ThreeXUIClient:
             **kwargs,
         )
 
-        # Session or CSRF token may have expired. A Bearer token doesn't
-        # expire, so a 401/403 there is a real authorization failure and
-        # retrying it would just loop.
-        if response.status_code in (401, 403) and not self._api_token:
+        if response.status_code in (401, 403):
+
+            if self._api_token:
+                # The token was rejected. It is read from the node's
+                # /etc/x-ui/install-result.env, which on a re-bootstrapped
+                # box can be left over from an earlier install, so this is
+                # recoverable rather than fatal: drop the token and fall
+                # back to the login/password we also hold. Cleared first so
+                # _login_request takes the session branch, and permanently
+                # so every later call on this client stops presenting a
+                # credential the panel has already refused.
+                self._api_token = None
+                self._http.headers.pop("Authorization", None)
 
             self._authenticated = False
             self._csrf_token = None
