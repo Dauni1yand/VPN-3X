@@ -80,7 +80,7 @@ async def delete_node(node_id: str, admin_telegram_id: int, db: AsyncSession = D
 @router.post("/bootstrap", response_model=NodeOut, status_code=status.HTTP_202_ACCEPTED)
 async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession = Depends(get_db)) -> NodeOut:
     """Kicks off "bare Ubuntu VPS -> serving VLESS node" and returns
-    straight away with the node in `provisioning`.
+    straight away with the node in `installing`.
 
     The install itself (apt + the 3x-ui installer over SSH) takes minutes,
     so it runs in the worker rather than in this request: holding the
@@ -88,6 +88,11 @@ async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession =
     before the work finished and the admin was left guessing. The node is
     visible in the list immediately, flips to `active` when the worker
     finishes, and the admin is notified either way.
+
+    Status is `installing`, not the more general `provisioning`, so that
+    /nodes/{id}/inbound refuses to touch it while the job still owns it --
+    an admin tapping "Создать инбаунд" on a node whose install isn't done
+    yet used to race the job and hit the 3x-ui panel before it existed.
 
     SSH credentials are passed to the job and never persisted; only the
     panel credentials generated here are stored (encrypted)."""
@@ -102,7 +107,7 @@ async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession =
         panel_login=panel_login,
         panel_password_encrypted=encrypt_secret(panel_password),
         country=payload.country.upper() if payload.country else None,
-        status=NodeStatus.provisioning,
+        status=NodeStatus.installing,
     )
     db.add(node)
     await db.flush()
@@ -147,6 +152,11 @@ async def provision_inbound(node_id: str, admin_telegram_id: int, db: AsyncSessi
     node = await db.get(Node, node_id)
     if node is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node not found")
+    if node.status == NodeStatus.installing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="нода ещё устанавливается автоматически, подождите завершения",
+        )
 
     existing = (
         await db.execute(select(Inbound).where(Inbound.node_id == node.id).limit(1))

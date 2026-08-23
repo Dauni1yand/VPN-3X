@@ -21,13 +21,18 @@ from app.services.threexui_client import get_pooled_client
 async def health_check_nodes(ctx) -> None:
     async with async_session_maker() as db:
         threshold = int(await get_setting(db, "node_alert_consecutive_failure_threshold"))
-        # `provisioning` nodes are mid-setup (bootstrap/provision_inbound own
-        # their status) and typically have no inbound yet -- skip them here
-        # so a panel-reachable-but-not-yet-provisioned node never gets
-        # promoted straight to `active` and picked up by the balancer before
-        # it can actually serve a client.
+        # `installing`/`provisioning` nodes are mid-setup (bootstrap_node_job
+        # or a manual provision_inbound owns their status) and typically have
+        # no inbound yet -- skip them here so a panel-reachable-but-not-yet-
+        # provisioned node never gets promoted straight to `active` and
+        # picked up by the balancer before it can actually serve a client. An
+        # `installing` node in particular usually has no panel to reach yet
+        # at all; probing it here would just add a spurious consecutive
+        # failure for something bootstrap_node_job is already handling.
         nodes = (
-            await db.execute(select(Node).where(Node.status != NodeStatus.provisioning))
+            await db.execute(
+                select(Node).where(Node.status.notin_([NodeStatus.installing, NodeStatus.provisioning]))
+            )
         ).scalars().all()
         # A reachable panel is not the same as a usable node: one whose
         # bootstrap failed part-way can answer on its panel port while

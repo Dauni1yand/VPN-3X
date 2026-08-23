@@ -153,11 +153,15 @@ async def cb_node_detail(callback: CallbackQuery) -> None:
         await safe_edit(callback.message, "Нода не найдена (уже удалена?).", kb.nodes_menu_kb())
         return
 
-    inbound_line = (
-        f"SNI: <code>{html.escape(node['sni'])}</code>"
-        if node.get("sni")
-        else ("Инбаунд создан" if node["has_inbound"] else "⚠️ Инбаунд ещё не создан")
-    )
+    if node["status"] == "installing":
+        inbound_line = "⏳ Устанавливается автоматически, подождите..."
+    elif node.get("sni"):
+        inbound_line = f"SNI: <code>{html.escape(node['sni'])}</code>"
+    elif node["has_inbound"]:
+        inbound_line = "Инбаунд создан"
+    else:
+        inbound_line = "⚠️ Инбаунд ещё не создан"
+
     await safe_edit(
         callback.message,
         f"🖥 <b>{html.escape(node['name'])}</b>\n\n"
@@ -166,7 +170,7 @@ async def cb_node_detail(callback: CallbackQuery) -> None:
         f"Статус: <b>{node['status']}</b>\n"
         f"Сбоев подряд: {node['consecutive_failures']}\n"
         f"{inbound_line}",
-        kb.node_detail_kb(node_id, node["has_inbound"]),
+        kb.node_detail_kb(node_id, node["has_inbound"], node["status"]),
     )
 
 

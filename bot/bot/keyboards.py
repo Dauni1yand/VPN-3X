@@ -94,19 +94,29 @@ def nodes_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
+STATUS_ICON = {
+    "installing": "⏳",
+    "provisioning": "🟡",
+    "active": "🟢",
+    "unstable": "🔴",
+    "disabled": "⚫️",
+}
+
+
 def node_list_kb(nodes: list[dict]) -> InlineKeyboardMarkup:
-    status_icon = {"active": "🟢", "unstable": "🔴", "provisioning": "🟡", "retired": "⚫️"}
     rows = [
-        [btn(f"{status_icon.get(n['status'], '❔')} {n['name']} ({n['ip']})", f"a:nd:{n['id']}")]
+        [btn(f"{STATUS_ICON.get(n['status'], '❔')} {n['name']} ({n['ip']})", f"a:nd:{n['id']}")]
         for n in nodes
     ]
     rows.append([btn(BACK, "a:nodes")])
     return _rows(*rows)
 
 
-def node_detail_kb(node_id: str, has_inbound: bool) -> InlineKeyboardMarkup:
+def node_detail_kb(node_id: str, has_inbound: bool, status: str) -> InlineKeyboardMarkup:
     rows = []
-    if has_inbound:
+    if status == "installing":
+        pass  # still being bootstrapped -- nothing to act on yet but delete
+    elif has_inbound:
         rows.append([btn("🔄 Сменить SNI", f"a:nsni:{node_id}")])
     else:
         rows.append([btn("🔧 Создать инбаунд", f"a:nprov:{node_id}")])

@@ -13,6 +13,15 @@ def _uuid() -> str:
 
 
 class NodeStatus(str, enum.Enum):
+    # Node row exists but 3x-ui isn't installed/reachable yet -- the
+    # background bootstrap_node_job owns it. Manual actions (provision
+    # inbound, rotate SNI) must not touch it until the job finishes and
+    # flips it to `active` or `unstable` -- doing so races the job and
+    # produces a raw connection error (the panel isn't listening yet).
+    installing = "installing"
+    # Connected via "готовая 3x-ui" (add_node): panel already reachable,
+    # but nothing has provisioned an inbound on it yet. This one *is*
+    # meant to be acted on manually.
     provisioning = "provisioning"
     active = "active"
     unstable = "unstable"
