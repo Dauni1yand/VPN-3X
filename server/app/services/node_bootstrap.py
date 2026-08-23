@@ -671,14 +671,19 @@ async def bootstrap_node(
                 ),
             )
 
-            # The panel binds to listenIP:port. A listenIP pinned to one
-            # address means loopback is refused, which looks exactly like
-            # "the panel never started" -- and the installer does pin it to
-            # 127.0.0.1 in some SSL modes. Clear it so it binds every
-            # interface; the firewall, not the bind address, is what keeps
-            # the panel private. Tolerated if the build has no such flag.
+            # The panel binds to listenIP:port, and the installer pins that
+            # to 127.0.0.1 in some SSL modes. Loopback-only is particularly
+            # nasty here: the panel probe runs ON the node over SSH, so it
+            # would find the panel and report success while the main server
+            # -- the only thing that actually needs to reach it -- could not
+            # connect at all.
+            #
+            # "0.0.0.0", not "": an empty value is silently ignored, because
+            # the CLI guards this with `if listenIP != ""`. The firewall,
+            # not the bind address, is what keeps the panel private.
+            # Tolerated if the build has no such flag.
             await conn.run(
-                f'{xui} setting -listenIP ""',
+                f"{xui} setting -listenIP 0.0.0.0",
                 check=False,
                 timeout=60,
                 input="",
