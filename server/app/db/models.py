@@ -80,6 +80,13 @@ class Node(Base):
     panel_base_url: Mapped[str] = mapped_column(String(255))
     panel_login: Mapped[str] = mapped_column(String(255))
     panel_password_encrypted: Mapped[str] = mapped_column(Text)
+    # 3x-ui API token (Settings -> API Tokens; the installer mints one at
+    # "install" scope = admin and writes it to /etc/x-ui/install-result.env).
+    # Preferred over the login/password session: a Bearer token sets
+    # `api_authed` in the panel, which bypasses its CSRF middleware entirely.
+    # Nullable because nodes connected manually via /nodes may only have
+    # login/password -- threexui_client falls back to a session for those.
+    panel_api_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     sni: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # ISO-3166 alpha-2 (e.g. "NL", "DE") set by the admin when the node is
     # added -- used as a coarse proxy for client<->node latency, see

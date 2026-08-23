@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.core.security import decrypt_secret
+from app.core.security import decrypt_secret, encrypt_secret
 
 from app.db.models import (
     Alert,
@@ -86,7 +86,7 @@ async def health_check_nodes(ctx) -> None:
 
             try:
 
-                await client.get_online_clients()
+                await client.health()
 
             except Exception as exc:
 
@@ -213,6 +213,15 @@ async def bootstrap_node_job(
             node.panel_base_url = (
                 bootstrap_result.panel_base_url
             )
+
+            # The API token is minted during install and printed exactly
+            # once; if we don't store it now it is unrecoverable. With it,
+            # panel calls authenticate via a Bearer header and skip the
+            # login/CSRF round trip entirely.
+            if bootstrap_result.panel_api_token:
+                node.panel_api_token_encrypted = encrypt_secret(
+                    bootstrap_result.panel_api_token
+                )
 
             # ----------------------------------------------------
             # Verify 3x-ui from the main server

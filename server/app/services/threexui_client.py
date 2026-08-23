@@ -1,4 +1,18 @@
-"""Async client for a 3x-ui node."""
+"""Async client for a node's 3x-ui panel.
+
+Auth: an API token is used when the node has one, otherwise a login session.
+
+The token path is strongly preferred. In 3x-ui, `checkAPIAuth` accepts
+`Authorization: Bearer <token>` and sets `api_authed`, and CSRFMiddleware
+short-circuits on `api_authed` -- so a token needs no cookie, no CSRF token
+and no re-login. The installer mints one at "install"/admin scope and writes
+it to /etc/x-ui/install-result.env, which node_bootstrap reads back.
+
+The session fallback exists only for nodes connected manually with just a
+login/password. Note the ordering there: /login is itself behind
+CSRFMiddleware and ValidateCSRFToken returns false when the session carries
+no token, so the CSRF token must be fetched *before* posting to /login.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +36,7 @@ class ThreeXUIClient:
         base_url: str,
         login: str,
         password: str,
+        api_token: str | None = None,
         timeout: float = 20.0,
     ) -> None:
 
@@ -30,6 +45,7 @@ class ThreeXUIClient:
         self._base_url = base_url
         self._login = login
         self._password = password
+        self._api_token = api_token
 
         self._http = httpx.AsyncClient(
             base_url=self._base_url,
@@ -40,15 +56,48 @@ class ThreeXUIClient:
             },
         )
 
-        self._authenticated = False
+        if api_token:
+            self._http.headers["Authorization"] = f"Bearer {api_token}"
+
+        self._authenticated = bool(api_token)
         self._csrf_token: str | None = None
 
     async def aclose(self) -> None:
         await self._http.aclose()
 
     async def _login_request(self) -> None:
+        """Establishes a panel session. Only used when the node has no API
+        token -- see the module docstring."""
 
-        # Login itself does not require an existing CSRF token.
+        if self._api_token:
+            # Nothing to do: the Bearer header is already set and the panel
+            # treats it as authenticated on every request.
+            self._authenticated = True
+            return
+
+        # Must come first: POST /login runs through CSRFMiddleware, and
+        # ValidateCSRFToken fails closed when the session has no token yet.
+        csrf_response = await self._http.get("/csrf-token")
+        csrf_response.raise_for_status()
+
+        try:
+            csrf_body = csrf_response.json()
+        except ValueError as exc:
+            raise ThreeXUIAuthError(
+                "3x-ui returned invalid CSRF response"
+            ) from exc
+
+        csrf_token = csrf_body.get("obj")
+
+        if not isinstance(csrf_token, str) or not csrf_token:
+            raise ThreeXUIAuthError(
+                f"3x-ui did not return a CSRF token: "
+                f"{csrf_body}"
+            )
+
+        self._csrf_token = csrf_token
+        self._http.headers["X-CSRF-Token"] = csrf_token
+
         response = await self._http.post(
             "/login",
             data={
@@ -74,33 +123,6 @@ class ThreeXUIClient:
                 f"{body.get('msg') or body}"
             )
 
-        # Modern 3x-ui requires this token for cookie-based
-        # unsafe requests.
-        csrf_response = await self._http.get(
-            "/csrf-token"
-        )
-
-        csrf_response.raise_for_status()
-
-        try:
-            csrf_body = csrf_response.json()
-        except ValueError as exc:
-            raise ThreeXUIAuthError(
-                "3x-ui returned invalid CSRF response"
-            ) from exc
-
-        csrf_token = csrf_body.get("obj")
-
-        if not isinstance(csrf_token, str) or not csrf_token:
-            raise ThreeXUIAuthError(
-                f"3x-ui did not return a CSRF token: "
-                f"{csrf_body}"
-            )
-
-        self._csrf_token = csrf_token
-
-        self._http.headers["X-CSRF-Token"] = csrf_token
-
         self._authenticated = True
 
     async def _request(
@@ -119,8 +141,10 @@ class ThreeXUIClient:
             **kwargs,
         )
 
-        # Session or CSRF token may have expired.
-        if response.status_code in (401, 403):
+        # Session or CSRF token may have expired. A Bearer token doesn't
+        # expire, so a 401/403 there is a real authorization failure and
+        # retrying it would just loop.
+        if response.status_code in (401, 403) and not self._api_token:
 
             self._authenticated = False
             self._csrf_token = None
@@ -162,6 +186,19 @@ class ThreeXUIClient:
             )
 
         return body
+
+    async def health(self) -> None:
+        """Cheapest authenticated round trip the panel offers -- /list/slim
+        returns inbounds without their client arrays or traffic stats, so a
+        node with thousands of clients doesn't ship all of it every minute
+        just to prove the panel is alive."""
+
+        response = await self._request(
+            "GET",
+            "/panel/api/inbounds/list/slim",
+        )
+
+        self._body(response)
 
     async def list_inbounds(self) -> list[dict]:
 
@@ -250,15 +287,15 @@ class ThreeXUIClient:
 
     async def delete_client(
         self,
-        inbound_id: int,
-        client_uuid: str,
+        email: str,
     ) -> dict:
+        """Clients are addressed by email, not by inbound id + UUID: 3x-ui
+        exposes /panel/api/clients/del/{email} and has no
+        /panel/api/inbounds/{id}/delClient/{uuid} route."""
 
         response = await self._request(
             "POST",
-            f"/panel/api/inbounds/"
-            f"{inbound_id}/delClient/"
-            f"{client_uuid}",
+            f"/panel/api/clients/del/{email}",
         )
 
         return self._body(response)
@@ -270,8 +307,7 @@ class ThreeXUIClient:
 
         response = await self._request(
             "GET",
-            f"/panel/api/inbounds/"
-            f"getClientTraffics/{email}",
+            f"/panel/api/clients/traffic/{email}",
         )
 
         body = self._body(response)
@@ -306,7 +342,8 @@ def get_pooled_client(node) -> ThreeXUIClient:
     fingerprint = (
         f"{node.panel_base_url}|"
         f"{node.panel_login}|"
-        f"{node.panel_password_encrypted}"
+        f"{node.panel_password_encrypted}|"
+        f"{node.panel_api_token_encrypted}"
     )
 
     cached = _client_cache.get(node.id)
@@ -322,6 +359,11 @@ def get_pooled_client(node) -> ThreeXUIClient:
         login=node.panel_login,
         password=decrypt_secret(
             node.panel_password_encrypted
+        ),
+        api_token=(
+            decrypt_secret(node.panel_api_token_encrypted)
+            if node.panel_api_token_encrypted
+            else None
         ),
     )
 

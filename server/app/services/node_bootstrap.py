@@ -53,6 +53,13 @@ class BootstrapResult:
     panel_port: int
     panel_web_base_path: str
     sni: str
+    # Panel credentials as the installer actually applied them, read back from
+    # /etc/x-ui/install-result.env rather than assumed. 3x-ui does not always
+    # honour every requested value, and the API token is only ever printed
+    # once at creation.
+    panel_login: str
+    panel_password: str
+    panel_api_token: str | None
 
 
 async def _run(
@@ -105,6 +112,42 @@ def _extract_setting(
     return match.group(1).strip()
 
 
+def _parse_install_result(output: str) -> dict[str, str]:
+    """Parses /etc/x-ui/install-result.env, which the 3x-ui installer writes
+    with `printf '%q'` per value so the file stays safely source-able.
+
+    This is the only place the panel's API token is ever exposed: the panel
+    stores just a SHA-256 hash, so a token not captured here can never be
+    recovered -- only replaced.
+    """
+
+    values: dict[str, str] = {}
+
+    for raw in output.splitlines():
+        line = raw.strip()
+
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, _, value = line.partition("=")
+        key = key.strip()
+
+        if not key.startswith("XUI_"):
+            continue
+
+        # Undo printf %q. For the alphanumeric values the installer generates
+        # this is a no-op, but a pinned password may legitimately contain
+        # characters that got escaped.
+        try:
+            parsed = shlex.split(value)
+        except ValueError:
+            parsed = []
+
+        values[key] = parsed[0] if parsed else value.strip().strip("'\"")
+
+    return values
+
+
 def _normalize_web_base_path(value: str) -> str:
 
     value = value.strip()
@@ -132,28 +175,54 @@ def _panel_url(
 async def _pick_node_sni(
     conn: asyncssh.SSHClientConnection,
 ) -> str:
+    """Picks the REALITY dest by measuring, from the node itself, which
+    candidate answers a TLS 1.3 handshake fastest.
 
-    for host in SNI_CANDIDATES:
+    Latency matters here rather than just reachability: every REALITY
+    connection makes the node handshake with this host, so the closest
+    candidate is the one that costs users the least. Probes run in parallel
+    on the node and the whole set is measured in one SSH round trip.
+    """
 
-        command = (
-            "curl -fsSIL "
-            "--http1.1 "
-            "--tlsv1.3 "
-            "--connect-timeout 5 "
-            "--max-time 10 "
-            f"https://{shlex.quote(host)}/ >/dev/null"
-        )
+    probes = " ".join(
+        f"probe {shlex.quote(host)} &" for host in SNI_CANDIDATES
+    )
 
-        try:
-            await _run(
-                conn,
-                command,
-                timeout=15,
-            )
-        except NodeBootstrapError:
+    command = (
+        "probe() { "
+        "t=$(curl -fsSIL --http1.1 --tlsv1.3 "
+        "--connect-timeout 5 --max-time 10 "
+        "-o /dev/null -w '%{time_total}' \"https://$1/\" 2>/dev/null) "
+        "&& echo \"$1 $t\"; "
+        "}; "
+        f"{probes} "
+        "wait"
+    )
+
+    result = await _run(conn, command, timeout=30)
+
+    ranked: list[tuple[float, str]] = []
+
+    for line in str(result.stdout or "").splitlines():
+        parts = line.split()
+
+        if len(parts) != 2:
             continue
 
-        return host
+        try:
+            ranked.append((float(parts[1]), parts[0]))
+        except ValueError:
+            continue
+
+    if not ranked:
+        raise NodeBootstrapError(
+            "the node could not complete a TLS 1.3 handshake "
+            "with any configured REALITY SNI"
+        )
+
+    ranked.sort()
+
+    return ranked[0][1]
 
     raise NodeBootstrapError(
         "the node could not complete a TLS 1.3 handshake "
@@ -374,6 +443,28 @@ async def bootstrap_node(
                 )
             )
 
+            # The installer also drops a machine-readable record of the
+            # install at /etc/x-ui/install-result.env. Port/webBasePath there
+            # are the installer's values, which the forced `x-ui setting`
+            # calls above may have since overridden -- `-show true` is newer,
+            # so it stays authoritative for those. The API token is the one
+            # thing only this file carries, and only this once: the panel
+            # keeps just its SHA-256 hash, so a token not captured here can
+            # never be read back, only replaced.
+            install_result = await conn.run(
+                "cat /etc/x-ui/install-result.env",
+                check=False,
+                timeout=30,
+                input="",
+            )
+
+            api_token: str | None = None
+
+            if install_result.exit_status == 0:
+                api_token = _parse_install_result(
+                    str(install_result.stdout or "")
+                ).get("XUI_API_TOKEN") or None
+
             if actual_port != panel_port:
 
                 raise NodeBootstrapError(
@@ -431,15 +522,39 @@ async def bootstrap_node(
                         f"ufw allow {ssh_port}/tcp",
                     )
 
-                    await _run(
-                        conn,
-                        f"ufw allow {panel_port}/tcp",
-                    )
-
+                    # 443 is the VLESS/REALITY port -- that one is the whole
+                    # point and has to be world-reachable.
                     await _run(
                         conn,
                         "ufw allow 443/tcp",
                     )
+
+                    # The 3x-ui panel is not. Only the main server ever calls
+                    # it, so scope it to the address we are connecting from
+                    # rather than leaving an admin panel exposed to the
+                    # internet. $SSH_CONNECTION's first field is the client
+                    # address as the node sees it, which is exactly the
+                    # origin the panel needs to accept.
+                    scoped = await conn.run(
+                        (
+                            'set -- $SSH_CONNECTION; src=$1; '
+                            'if [ -n "$src" ]; then '
+                            f'ufw allow from "$src" to any port {panel_port} proto tcp; '
+                            "else exit 1; fi"
+                        ),
+                        check=False,
+                        timeout=30,
+                        input="",
+                    )
+
+                    if scoped.exit_status != 0:
+                        # No SSH_CONNECTION to key off (unusual, but possible
+                        # behind some proxies). Fall back to opening the port
+                        # rather than locking ourselves out of the panel.
+                        await _run(
+                            conn,
+                            f"ufw allow {panel_port}/tcp",
+                        )
 
             # --------------------------------------------------------
             # Probe REALITY SNI FROM THE NODE
@@ -456,6 +571,9 @@ async def bootstrap_node(
                 panel_port=actual_port,
                 panel_web_base_path=actual_path,
                 sni=sni,
+                panel_login=panel_login,
+                panel_password=panel_password,
+                panel_api_token=api_token,
             )
 
     except NodeBootstrapError:

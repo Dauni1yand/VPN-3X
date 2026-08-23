@@ -17,7 +17,11 @@ from app.services.threexui_client import get_pooled_client
 
 
 async def migrate_client(
-    client: Client, old_inbound: Inbound, old_node: Node, target_inbound: Inbound, target_node: Node
+    client: Client,
+    old_inbound: Inbound,  # noqa: ARG001 -- kept for call-site symmetry with the target side
+    old_node: Node,
+    target_inbound: Inbound,
+    target_node: Node,
 ) -> None:
     new_uuid = str(uuid.uuid4())
     new_email = f"{client.email.rsplit('-', 1)[0]}-{new_uuid[:8]}"
@@ -25,21 +29,18 @@ async def migrate_client(
     target_threexui = get_pooled_client(target_node)
     await target_threexui.add_client(
         inbound_id=target_inbound.remote_inbound_id,
-        client_settings={
-            "clients": [
-                {
-                    "id": new_uuid,
-                    "email": new_email,
-                    "flow": "xtls-rprx-vision",
-                    "expiryTime": int(client.expires_at.timestamp() * 1000),
-                }
-            ]
+        client={
+            "id": new_uuid,
+            "email": new_email,
+            "flow": "xtls-rprx-vision",
+            "expiryTime": int(client.expires_at.timestamp() * 1000),
+            "enable": True,
         },
     )
 
     old_threexui = get_pooled_client(old_node)
     try:
-        await old_threexui.delete_client(old_inbound.remote_inbound_id, client.remote_client_uuid)
+        await old_threexui.delete_client(client.email)
     except Exception:  # noqa: BLE001 -- best-effort cleanup; the new client is already
         # active on the target node by this point, so a stale leftover on a
         # node we're migrating away from (often because it's unhealthy) must
