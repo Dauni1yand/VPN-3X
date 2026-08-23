@@ -80,11 +80,20 @@ async def cb_menu(callback: CallbackQuery, state: FSMContext) -> None:
 # --------------------------------------------------------------------------
 
 
+SERVICE_UNAVAILABLE = (
+    "⚠️ Сервис временно недоступен, попробуйте через пару минут."
+)
+
+
 @router.callback_query(F.data == "u:subscribe")
 async def cb_subscribe(callback: CallbackQuery) -> None:
     await callback.answer()
-    amount = await server_api.get_setting("subscription_price_amount")
-    asset = await server_api.get_setting("subscription_price_asset")
+    try:
+        amount = await server_api.get_setting("subscription_price_amount")
+        asset = await server_api.get_setting("subscription_price_asset")
+    except httpx.HTTPError:
+        await safe_edit(callback.message, SERVICE_UNAVAILABLE, back_to_user_menu_kb())
+        return
 
     try:
         invoice = await cryptobot.create_invoice(
@@ -100,6 +109,9 @@ async def cb_subscribe(callback: CallbackQuery) -> None:
             back_to_user_menu_kb(),
         )
         return
+    except httpx.HTTPError:
+        await safe_edit(callback.message, SERVICE_UNAVAILABLE, back_to_user_menu_kb())
+        return
 
     await safe_edit(
         callback.message,
@@ -113,16 +125,22 @@ async def cb_subscribe(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("u:paid:"))
 async def cb_check_payment(callback: CallbackQuery) -> None:
     invoice_id = int(callback.data.split(":")[2])
-    status = await cryptobot.get_invoice_status(invoice_id)
+    try:
+        status = await cryptobot.get_invoice_status(invoice_id)
+    except (CryptoBotNotConfiguredError, httpx.HTTPError):
+        await callback.answer(
+            "Не удалось проверить оплату прямо сейчас. Попробуйте через минуту.", show_alert=True
+        )
+        return
 
     if status != "paid":
         await callback.answer("Оплата ещё не найдена. Попробуйте через минуту.", show_alert=True)
         return
 
     await callback.answer("Оплата найдена!")
-    amount = await server_api.get_setting("subscription_price_amount")
-    asset = await server_api.get_setting("subscription_price_asset")
     try:
+        amount = await server_api.get_setting("subscription_price_amount")
+        asset = await server_api.get_setting("subscription_price_asset")
         result = await server_api.confirm_payment(
             telegram_id=callback.from_user.id,
             provider_invoice_id=str(invoice_id),
@@ -133,11 +151,18 @@ async def cb_check_payment(callback: CallbackQuery) -> None:
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 409:
             # The webhook already credited this invoice -- show what they have.
-            client = await server_api.get_user_client(callback.from_user.id)
+            try:
+                client = await server_api.get_user_client(callback.from_user.id)
+            except httpx.HTTPError:
+                client = None
             if client:
                 await safe_edit(callback.message, _config_text(client), back_to_user_menu_kb())
                 return
-        raise
+        await _payment_stuck(callback, invoice_id, str(exc))
+        return
+    except httpx.HTTPError as exc:
+        await _payment_stuck(callback, invoice_id, str(exc))
+        return
 
     await safe_edit(
         callback.message,
@@ -146,10 +171,42 @@ async def cb_check_payment(callback: CallbackQuery) -> None:
     )
 
 
+async def _payment_stuck(callback: CallbackQuery, invoice_id: int, reason: str) -> None:
+    """The money is already taken but we couldn't hand back a config.
+
+    Never let this look like a lost payment. CryptoBot's webhook keeps
+    retrying the same invoice, so the config usually appears on its own a
+    moment later -- say so, and put it in front of an admin either way.
+    """
+    await safe_edit(
+        callback.message,
+        "✅ Оплата получена.\n\n"
+        "⚠️ Конфиг пока не удалось выдать — обычно он появляется сам в течение "
+        "нескольких минут. Загляните в «🔑 Мой конфиг» чуть позже.\n\n"
+        "Если не появится — напишите в поддержку, мы уже знаем о проблеме.",
+        back_to_user_menu_kb(),
+    )
+    for admin_id in settings.admin_ids:
+        try:
+            await callback.bot.send_message(
+                admin_id,
+                f"⚠️ Оплата прошла, но конфиг не выдан.\n"
+                f"Пользователь: {callback.from_user.id}\n"
+                f"Инвойс: {invoice_id}\n"
+                f"Причина: {reason}",
+            )
+        except Exception:  # noqa: BLE001 -- alerting must not mask the original failure
+            pass
+
+
 @router.callback_query(F.data == "u:config")
 async def cb_my_config(callback: CallbackQuery) -> None:
     await callback.answer()
-    client = await server_api.get_user_client(callback.from_user.id)
+    try:
+        client = await server_api.get_user_client(callback.from_user.id)
+    except httpx.HTTPError:
+        await safe_edit(callback.message, SERVICE_UNAVAILABLE, back_to_user_menu_kb())
+        return
     if client is None:
         await safe_edit(
             callback.message,
@@ -177,7 +234,7 @@ async def cb_support(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(Support.message)
+@router.message(Support.message, F.text)
 async def handle_support_message(message: Message, state: FSMContext) -> None:
     await state.clear()
 

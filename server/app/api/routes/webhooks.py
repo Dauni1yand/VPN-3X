@@ -4,6 +4,8 @@ one authenticates itself differently (here: HMAC signature)."""
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +14,8 @@ from app.db.session import get_db
 from app.schemas.subscriptions import PaymentConfirm
 from app.services.cryptobot_webhook import verify_webhook_signature
 from app.services.rate_limit import enforce_rate_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -43,11 +47,28 @@ async def cryptobot_webhook(
     if body.get("update_type") != "invoice_paid":
         return {"ok": True}  # nothing to do for other update types
 
-    invoice = body["payload"]
+    invoice = body.get("payload") or {}
     # `payload` here is CryptoBot's own passthrough field, set to our
     # "telegram_id:plan_code" string at createInvoice time (see
-    # bot/handlers/user.py cmd_subscribe).
-    telegram_id_str, plan_code = invoice["payload"].split(":", 1)
+    # bot/handlers/user.py cb_subscribe). An invoice created outside that
+    # flow -- by hand in the CryptoBot UI, or by an older build -- carries
+    # something else, and there is no user to credit. Ack it: a non-2xx
+    # makes CryptoBot redeliver the same unparseable event indefinitely.
+    raw_payload = invoice.get("payload") or ""
+    telegram_id_str, _, plan_code = raw_payload.partition(":")
+
+    if not telegram_id_str.lstrip("-").isdigit() or not plan_code:
+        logger.warning(
+            "ignoring invoice_paid with unrecognised payload %r (invoice_id=%s)",
+            raw_payload,
+            invoice.get("invoice_id"),
+        )
+        return {"ok": True}
+
+    for field in ("invoice_id", "amount", "asset"):
+        if invoice.get(field) in (None, ""):
+            logger.warning("ignoring invoice_paid missing %s: %r", field, invoice)
+            return {"ok": True}
 
     try:
         await confirm_payment(

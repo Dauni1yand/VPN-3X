@@ -52,13 +52,21 @@ def _valid_ip(value: str) -> bool:
     return True
 
 
-def _api_error(exc: httpx.HTTPStatusError) -> str:
-    """The server's own `detail` if it sent one -- it's written for a human
-    (e.g. "Cloudflare isn't configured yet..."), unlike a bare status code."""
-    try:
-        return str(exc.response.json().get("detail", exc.response.text))
-    except ValueError:
-        return exc.response.text or str(exc)
+def _api_error(exc: httpx.HTTPError) -> str:
+    """A human-readable reason for any failed call to the main server.
+
+    For an HTTP error status the server's own `detail` is used -- it's
+    written for a human (e.g. "нода ещё устанавливается...") unlike a bare
+    status code. For a transport failure (server down, timeout, DNS) there
+    is no response at all, so say that plainly instead of letting the
+    exception escape and leave the button looking dead.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            return str(exc.response.json().get("detail", exc.response.text))
+        except ValueError:
+            return exc.response.text or str(exc)
+    return f"главный сервер не отвечает ({type(exc).__name__}: {exc})"
 
 
 async def _start_wizard(callback: CallbackQuery, state: FSMContext, back: str) -> None:
@@ -125,7 +133,13 @@ async def cb_menu(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "a:nodes:list")
 async def cb_nodes_list(callback: CallbackQuery) -> None:
     await callback.answer()
-    nodes = await server_api.list_nodes()
+    try:
+        nodes = await server_api.list_nodes()
+    except httpx.HTTPError as exc:
+        await safe_edit(
+            callback.message, f"❌ Не удалось получить список: {_api_error(exc)}", kb.nodes_menu_kb()
+        )
+        return
     if not nodes:
         await safe_edit(
             callback.message,
@@ -148,7 +162,13 @@ async def _find_node(node_id: str) -> dict | None:
 async def cb_node_detail(callback: CallbackQuery) -> None:
     await callback.answer()
     node_id = callback.data.split(":", 2)[2]
-    node = await _find_node(node_id)
+    try:
+        node = await _find_node(node_id)
+    except httpx.HTTPError as exc:
+        await safe_edit(
+            callback.message, f"❌ Не удалось получить ноду: {_api_error(exc)}", kb.nodes_menu_kb()
+        )
+        return
     if node is None:
         await safe_edit(callback.message, "Нода не найдена (уже удалена?).", kb.nodes_menu_kb())
         return
@@ -181,7 +201,7 @@ async def cb_node_provision(callback: CallbackQuery) -> None:
     await safe_edit(callback.message, "🔧 Подбираю рабочий SNI и создаю инбаунд...")
     try:
         inbound = await server_api.provision_inbound(node_id, callback.from_user.id)
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await safe_edit(callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_to_admin_kb())
         return
     await safe_edit(
@@ -198,7 +218,7 @@ async def cb_node_rotate_sni(callback: CallbackQuery) -> None:
     await safe_edit(callback.message, "🔄 Ищу рабочий SNI...")
     try:
         inbound = await server_api.rotate_sni(node_id, callback.from_user.id)
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await safe_edit(callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_to_admin_kb())
         return
     await safe_edit(
@@ -214,7 +234,10 @@ async def cb_node_rotate_sni(callback: CallbackQuery) -> None:
 async def cb_node_delete_ask(callback: CallbackQuery) -> None:
     await callback.answer()
     node_id = callback.data.split(":", 2)[2]
-    node = await _find_node(node_id)
+    try:
+        node = await _find_node(node_id)
+    except httpx.HTTPError:
+        node = None  # name is cosmetic here; the id still identifies the node
     name = node["name"] if node else node_id
     await safe_edit(
         callback.message,
@@ -230,7 +253,7 @@ async def cb_node_delete(callback: CallbackQuery) -> None:
     node_id = callback.data.split(":", 2)[2]
     try:
         await server_api.delete_node(node_id, callback.from_user.id)
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await safe_edit(callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_to_admin_kb())
         return
     await safe_edit(callback.message, "✅ Нода удалена.", kb.back_kb("a:nodes"))
@@ -255,7 +278,7 @@ async def cb_add_node(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(AddNode.name)
+@router.message(AddNode.name, F.text)
 async def add_node_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=message.text.strip())
     await state.set_state(AddNode.ip)
@@ -269,7 +292,7 @@ async def add_node_name(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(AddNode.ip)
+@router.message(AddNode.ip, F.text)
 async def add_node_ip(message: Message, state: FSMContext) -> None:
     ip = message.text.strip()
     if not _valid_ip(ip):
@@ -295,7 +318,7 @@ async def add_node_ip(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(AddNode.ssh_password)
+@router.message(AddNode.ssh_password, F.text)
 async def add_node_password(message: Message, state: FSMContext) -> None:
     await state.update_data(ssh_password=message.text.strip())
     await _scrub(message)
@@ -319,11 +342,8 @@ async def _run_bootstrap(
         node = await server_api.bootstrap_node(
             data["name"], data["ip"], data["ssh_password"], country, admin_id
         )
-    except httpx.HTTPStatusError as exc:
-        await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", "a:nodes")
-        return
     except httpx.HTTPError as exc:
-        await _finish(message, state, f"❌ Сервер не ответил: {exc}", "a:nodes")
+        await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", "a:nodes")
         return
     await _finish(
         message,
@@ -331,14 +351,14 @@ async def _run_bootstrap(
         f"🚀 <b>Установка запущена</b>\n\n"
         f"Нода: {html.escape(node['name'])}\n"
         f"IP: <code>{node['ip']}</code>\n\n"
-        "Она уже видна в списке со статусом 🟡. Установка 3x-ui занимает "
+        "Она уже видна в списке со статусом ⏳. Установка 3x-ui занимает "
         "несколько минут — я пришлю отдельное сообщение, когда нода "
         "заработает или если что-то пойдёт не так. Чат можно закрыть.",
         "a:nodes",
     )
 
 
-@router.message(AddNode.country)
+@router.message(AddNode.country, F.text)
 async def add_node_country(message: Message, state: FSMContext) -> None:
     await _run_bootstrap(message, state, message.text.strip().upper()[:2], message.from_user.id)
 
@@ -368,7 +388,7 @@ async def cb_connect_node(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectNode.name)
+@router.message(ConnectNode.name, F.text)
 async def connect_node_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=message.text.strip())
     await state.set_state(ConnectNode.ip)
@@ -381,7 +401,7 @@ async def connect_node_name(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectNode.ip)
+@router.message(ConnectNode.ip, F.text)
 async def connect_node_ip(message: Message, state: FSMContext) -> None:
     ip = message.text.strip()
     if not _valid_ip(ip):
@@ -405,7 +425,7 @@ async def connect_node_ip(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectNode.panel_url)
+@router.message(ConnectNode.panel_url, F.text)
 async def connect_node_panel(message: Message, state: FSMContext) -> None:
     await state.update_data(panel_url=message.text.strip())
     await state.set_state(ConnectNode.login)
@@ -418,7 +438,7 @@ async def connect_node_panel(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectNode.login)
+@router.message(ConnectNode.login, F.text)
 async def connect_node_login(message: Message, state: FSMContext) -> None:
     await state.update_data(login=message.text.strip())
     await state.set_state(ConnectNode.password)
@@ -432,7 +452,7 @@ async def connect_node_login(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectNode.password)
+@router.message(ConnectNode.password, F.text)
 async def connect_node_password(message: Message, state: FSMContext) -> None:
     await state.update_data(password=message.text.strip())
     await _scrub(message)
@@ -460,7 +480,7 @@ async def _run_connect_node(
             country,
             admin_id,
         )
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", "a:nodes")
         return
     await _finish(
@@ -472,7 +492,7 @@ async def _run_connect_node(
     )
 
 
-@router.message(ConnectNode.country)
+@router.message(ConnectNode.country, F.text)
 async def connect_node_country(message: Message, state: FSMContext) -> None:
     await _run_connect_node(message, state, message.text.strip().upper()[:2], message.from_user.id)
 
@@ -502,7 +522,7 @@ async def cb_issue_config(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(IssueConfig.telegram_id)
+@router.message(IssueConfig.telegram_id, F.text)
 async def issue_config_user(message: Message, state: FSMContext) -> None:
     raw = message.text.strip()
     if not raw.lstrip("-").isdigit():
@@ -525,7 +545,7 @@ async def issue_config_user(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(IssueConfig.hours)
+@router.message(IssueConfig.hours, F.text)
 async def issue_config_hours(message: Message, state: FSMContext) -> None:
     raw = message.text.strip()
     if not raw.isdigit() or int(raw) == 0:
@@ -557,7 +577,7 @@ async def issue_config_node(callback: CallbackQuery, state: FSMContext) -> None:
         result = await server_api.create_admin_client(
             data["telegram_id"], data["hours"] * 3600, node_id, callback.from_user.id
         )
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await _finish(callback.message, state, f"❌ Не получилось: {_api_error(exc)}", "a:clients")
         return
     await _finish(
@@ -585,7 +605,7 @@ async def cb_migrate(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(MigrateClient.client_id)
+@router.message(MigrateClient.client_id, F.text)
 async def migrate_client_id(message: Message, state: FSMContext) -> None:
     await state.update_data(client_id=message.text.strip())
     nodes = [n for n in await server_api.list_nodes() if n["has_inbound"]]
@@ -608,7 +628,7 @@ async def migrate_client_node(callback: CallbackQuery, state: FSMContext) -> Non
         result = await server_api.migrate_client(
             data["client_id"], callback.from_user.id, None if target == "auto" else target
         )
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await _finish(callback.message, state, f"❌ Не получилось: {_api_error(exc)}", "a:clients")
         return
     await _finish(
@@ -694,7 +714,7 @@ async def cb_single_setting(callback: CallbackQuery, state: FSMContext) -> None:
     await safe_edit(callback.message, spec["prompt"], kb.cancel_kb())
 
 
-@router.message(SingleValue.value)
+@router.message(SingleValue.value, F.text)
 async def single_setting_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     spec = SINGLE_SETTINGS[data["spec_key"]]
@@ -708,7 +728,7 @@ async def single_setting_value(message: Message, state: FSMContext) -> None:
 
     try:
         await server_api.set_setting(spec["key"], spec["transform"](raw), message.from_user.id)
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", spec["back"])
         return
     await _finish(message, state, spec["done"](raw), spec["back"])
@@ -726,7 +746,7 @@ async def cb_set_price(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(SetPrice.amount)
+@router.message(SetPrice.amount, F.text)
 async def set_price_amount(message: Message, state: FSMContext) -> None:
     raw = message.text.strip().replace(",", ".")
     try:
@@ -746,7 +766,7 @@ async def set_price_amount(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SetPrice.asset)
+@router.message(SetPrice.asset, F.text)
 async def set_price_asset(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     asset = message.text.strip().upper()
@@ -768,7 +788,7 @@ async def cb_set_ad_durations(callback: CallbackQuery, state: FSMContext) -> Non
     )
 
 
-@router.message(SetAdDurations.short)
+@router.message(SetAdDurations.short, F.text)
 async def set_ad_short(message: Message, state: FSMContext) -> None:
     raw = message.text.strip()
     if not raw.isdigit() or int(raw) == 0:
@@ -785,7 +805,7 @@ async def set_ad_short(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SetAdDurations.long)
+@router.message(SetAdDurations.long, F.text)
 async def set_ad_long(message: Message, state: FSMContext) -> None:
     raw = message.text.strip()
     if not raw.isdigit() or int(raw) == 0:
@@ -862,7 +882,7 @@ async def cb_cf_connect(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(ConnectCloudflare.record_name)
+@router.message(ConnectCloudflare.record_name, F.text)
 async def cf_record_name(message: Message, state: FSMContext) -> None:
     await state.update_data(record_name=message.text.strip())
     await state.set_state(ConnectCloudflare.server_ip)
@@ -885,7 +905,7 @@ async def _run_cf_connect(
         result = await server_api.connect_cloudflare(
             data["record_name"], server_ip, admin_id
         )
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPError as exc:
         await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", "a:cf")
         return
     await _finish(
@@ -900,7 +920,7 @@ async def _run_cf_connect(
     )
 
 
-@router.message(ConnectCloudflare.server_ip)
+@router.message(ConnectCloudflare.server_ip, F.text)
 async def cf_server_ip(message: Message, state: FSMContext) -> None:
     ip = message.text.strip()
     if not _valid_ip(ip):
@@ -919,3 +939,36 @@ async def cf_server_ip(message: Message, state: FSMContext) -> None:
 async def cf_skip_ip(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _run_cf_connect(callback.message, state, None, callback.from_user.id)
+
+
+# --------------------------------------------------------------------------
+# Wizard fallback
+# --------------------------------------------------------------------------
+
+# Every wizard step above is registered with `F.text`, so a photo, sticker,
+# voice note or forwarded media doesn't match it. Without this the update
+# would fall through unanswered and the wizard would look frozen -- the
+# admin sent something and nothing happened. (Before the `F.text` guards,
+# it was worse: message.text was None and .strip() raised.)
+@router.message(
+    StateFilter(
+        AddNode.name, AddNode.ip, AddNode.ssh_password, AddNode.country,
+        ConnectNode.name, ConnectNode.ip, ConnectNode.panel_url,
+        ConnectNode.login, ConnectNode.password, ConnectNode.country,
+        IssueConfig.telegram_id, IssueConfig.hours,
+        MigrateClient.client_id,
+        SingleValue.value,
+        SetPrice.amount, SetPrice.asset,
+        SetAdDurations.short, SetAdDurations.long,
+        ConnectCloudflare.record_name, ConnectCloudflare.server_ip,
+    )
+)
+async def wizard_expects_text(message: Message, state: FSMContext) -> None:
+    await _scrub(message)
+    await _panel(
+        message,
+        state,
+        "❌ Здесь нужно <b>текстовое</b> сообщение.\n\n"
+        "Отправьте значение текстом или нажмите «Отмена».",
+        kb.cancel_kb(),
+    )

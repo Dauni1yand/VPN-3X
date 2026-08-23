@@ -497,6 +497,14 @@ async def bootstrap_node(
             # UFW
             # --------------------------------------------------------
 
+            # A 3x-ui panel listens on 0.0.0.0 and is a known target, so it
+            # must not stay reachable from the internet. Ubuntu ships ufw
+            # installed but INACTIVE, which is why simply adding rules is not
+            # enough -- an inactive ufw enforces nothing, and the panel port
+            # stays wide open. Rules are added first and ufw is enabled last,
+            # so the SSH session this runs over is already allowed by the
+            # time enforcement starts.
+
             ufw = await conn.run(
                 "command -v ufw",
                 check=False,
@@ -506,6 +514,47 @@ async def bootstrap_node(
 
             if ufw.exit_status == 0:
 
+                # SSH first, and before enabling: getting this wrong locks
+                # the admin out of their own server.
+                await _run(
+                    conn,
+                    f"ufw allow {ssh_port}/tcp",
+                )
+
+                # 443 is the VLESS/REALITY port -- that one is the whole
+                # point and has to be world-reachable.
+                await _run(
+                    conn,
+                    "ufw allow 443/tcp",
+                )
+
+                # The 3x-ui panel is not. Only the main server ever calls
+                # it, so scope it to the address we are connecting from
+                # rather than leaving an admin panel exposed to the
+                # internet. $SSH_CONNECTION's first field is the client
+                # address as the node sees it, which is exactly the
+                # origin the panel needs to accept.
+                scoped = await conn.run(
+                    (
+                        'set -- $SSH_CONNECTION; src=$1; '
+                        'if [ -n "$src" ]; then '
+                        f'ufw allow from "$src" to any port {panel_port} proto tcp; '
+                        "else exit 1; fi"
+                    ),
+                    check=False,
+                    timeout=30,
+                    input="",
+                )
+
+                if scoped.exit_status != 0:
+                    # No SSH_CONNECTION to key off (unusual, but possible
+                    # behind some proxies). Fall back to opening the port
+                    # rather than locking ourselves out of the panel.
+                    await _run(
+                        conn,
+                        f"ufw allow {panel_port}/tcp",
+                    )
+
                 status = await conn.run(
                     "ufw status",
                     check=False,
@@ -513,48 +562,15 @@ async def bootstrap_node(
                     input="",
                 )
 
-                if "Status: active" in str(
-                    status.stdout
-                ):
-
+                if "Status: active" not in str(status.stdout):
+                    # --force skips the interactive "may disrupt existing ssh
+                    # connections" prompt, which would otherwise hang forever
+                    # on a channel with no tty.
                     await _run(
                         conn,
-                        f"ufw allow {ssh_port}/tcp",
+                        "ufw --force enable",
+                        timeout=60,
                     )
-
-                    # 443 is the VLESS/REALITY port -- that one is the whole
-                    # point and has to be world-reachable.
-                    await _run(
-                        conn,
-                        "ufw allow 443/tcp",
-                    )
-
-                    # The 3x-ui panel is not. Only the main server ever calls
-                    # it, so scope it to the address we are connecting from
-                    # rather than leaving an admin panel exposed to the
-                    # internet. $SSH_CONNECTION's first field is the client
-                    # address as the node sees it, which is exactly the
-                    # origin the panel needs to accept.
-                    scoped = await conn.run(
-                        (
-                            'set -- $SSH_CONNECTION; src=$1; '
-                            'if [ -n "$src" ]; then '
-                            f'ufw allow from "$src" to any port {panel_port} proto tcp; '
-                            "else exit 1; fi"
-                        ),
-                        check=False,
-                        timeout=30,
-                        input="",
-                    )
-
-                    if scoped.exit_status != 0:
-                        # No SSH_CONNECTION to key off (unusual, but possible
-                        # behind some proxies). Fall back to opening the port
-                        # rather than locking ourselves out of the panel.
-                        await _run(
-                            conn,
-                            f"ufw allow {panel_port}/tcp",
-                        )
 
             # --------------------------------------------------------
             # Probe REALITY SNI FROM THE NODE
