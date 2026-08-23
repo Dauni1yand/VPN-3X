@@ -167,6 +167,7 @@ def _panel_url(
     host: str,
     port: int,
     path: str,
+    scheme: str = "http",
 ) -> str:
 
     display_host = host
@@ -174,7 +175,7 @@ def _panel_url(
     if ":" in host and not host.startswith("["):
         display_host = f"[{host}]"
 
-    return f"http://{display_host}:{port}{path}"
+    return f"{scheme}://{display_host}:{port}{path}"
 
 
 async def _panel_diagnostics(
@@ -192,8 +193,18 @@ async def _panel_diagnostics(
 
     probes = (
         ("service state", "systemctl is-active x-ui 2>&1; systemctl is-enabled x-ui 2>&1"),
-        ("listening sockets", f"ss -ltnp 2>/dev/null | grep -E ':{port}\\b' || echo '(nothing listening on {port})'"),
-        ("recent log", "journalctl -u x-ui --no-pager -n 40 2>&1 || tail -n 40 /var/log/x-ui/*.log 2>&1"),
+        # Every socket x-ui owns, not just the port we hoped for -- if the
+        # panel came up somewhere else this is the line that says where.
+        ("x-ui sockets", "ss -ltnp 2>/dev/null | grep x-ui || echo '(x-ui owns no listening socket)'"),
+        ("configured listen", "x-ui setting -getListen 2>&1 | tail -3"),
+        # Targeted, not a blind tail: the bind line and any error are what
+        # matter, and a truncated tail was cutting exactly those off.
+        (
+            "panel/bind log",
+            "journalctl -u x-ui --no-pager -n 400 2>/dev/null "
+            "| grep -aiE 'web server running|sub server running|error|fail|panic|bind' "
+            "| tail -12 || echo '(no matching log lines)'",
+        ),
     )
 
     sections: list[str] = []
@@ -217,45 +228,118 @@ async def _panel_diagnostics(
     return "\n".join(sections)
 
 
+async def _xui_listeners(
+    conn: asyncssh.SSHClientConnection,
+) -> list[tuple[str, int]]:
+    """Every (host, port) x-ui currently listens on, as the node sees it.
+
+    Parsed from `ss` rather than assumed from settings: the panel binds to
+    `listenIP:port`, where listenIP may be a specific address and the port
+    can be overridden by XUI_PORT in the service environment. Both make the
+    stored port a poor guess at where the panel actually is.
+    """
+
+    result = await conn.run(
+        "ss -ltnpH 2>/dev/null | grep x-ui",
+        check=False,
+        timeout=30,
+        input="",
+    )
+
+    found: list[tuple[str, int]] = []
+
+    for line in str(result.stdout or "").splitlines():
+        fields = line.split()
+
+        if len(fields) < 4:
+            continue
+
+        local = fields[3]
+        host, _, port_text = local.rpartition(":")
+
+        if not port_text.isdigit():
+            continue
+
+        host = host.strip("[]")
+
+        # A wildcard bind is reachable over loopback; a specific one is only
+        # reachable at that address.
+        if host in ("*", "0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+
+        found.append((host, int(port_text)))
+
+    return found
+
+
+async def _probe_panel(
+    conn: asyncssh.SSHClientConnection,
+    host: str,
+    port: int,
+    path: str,
+) -> str | None:
+    """Returns the scheme that answered ("http"/"https"), or None. Tries
+    HTTPS as well as HTTP:
+    3x-ui serves TLS whenever a certificate is configured, and -k accepts the
+    self-signed one it may have generated for itself."""
+
+    for scheme in ("http", "https"):
+        url = f"{scheme}://{host}:{port}{path}"
+        result = await conn.run(
+            f"curl -fsSk --max-time 10 {shlex.quote(url)} >/dev/null",
+            check=False,
+            timeout=30,
+            input="",
+        )
+        if result.exit_status == 0:
+            return scheme
+
+    return None
+
+
 async def _wait_for_panel(
     conn: asyncssh.SSHClientConnection,
-    url: str,
-    port: int,
+    path: str,
+    expected_port: int,
     *,
     timeout_seconds: int = PANEL_START_TIMEOUT_SECONDS,
     secrets_to_redact: tuple[str, ...] = (),
-) -> None:
-    """Waits for 3x-ui to actually accept connections.
+) -> tuple[str, int]:
+    """Waits for the 3x-ui panel to answer and reports where it actually is.
+
+    Returns (scheme, port). Both can differ from what was asked for: what
+    the settings table says and what the process bound are not the same
+    thing, and the panel serves TLS whenever a certificate is configured.
 
     `x-ui restart` returns as soon as systemd has started the unit, but the
-    Go process still has to open its listener -- on a small VPS that can take
-    appreciably longer than the few seconds a fixed sleep would allow. A
-    refused connection also fails instantly, so curl's --max-time provides no
-    grace at all; the retry loop is what actually gives the panel time.
+    Go process still has to open its listener -- on a small VPS that gap is
+    longer than a fixed sleep allows. A refused connection also fails
+    instantly, so curl's --max-time gives no grace at all; the retry loop is
+    what actually gives the panel time.
     """
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     # One restart partway through, in case the first `enable --now` raced the
-    # installer finishing. Cheap, and it fixes the case where the unit came up
-    # before its config was fully written.
+    # installer finishing writing its config.
     retry_restart_at = loop.time() + timeout_seconds / 3
     restarted = False
 
-    last = ""
-
     while True:
-        result = await conn.run(
-            f"curl -fsS --max-time 10 {shlex.quote(url)} >/dev/null",
-            check=False,
-            timeout=30,
-            input="",
+        listeners = await _xui_listeners(conn)
+
+        # Prefer the port we asked for, then loopback, then anything x-ui
+        # owns -- the panel is usually not the only socket it holds (the
+        # subscription server has its own).
+        candidates = sorted(
+            listeners,
+            key=lambda item: (item[1] != expected_port, item[0] != "127.0.0.1"),
         )
 
-        if result.exit_status == 0:
-            return
-
-        last = (str(result.stderr or "") + str(result.stdout or "")).strip()
+        for host, port in candidates:
+            scheme = await _probe_panel(conn, host, port, path)
+            if scheme is not None:
+                return scheme, port
 
         now = loop.time()
 
@@ -273,11 +357,14 @@ async def _wait_for_panel(
 
         await asyncio.sleep(3)
 
-    diagnostics = await _panel_diagnostics(conn, port, secrets_to_redact)
+    diagnostics = await _panel_diagnostics(conn, expected_port, secrets_to_redact)
+
+    seen = ", ".join(f"{h}:{p}" for h, p in listeners) or "none"
 
     raise NodeBootstrapError(
-        f"3x-ui did not start listening on {url} within "
-        f"{timeout_seconds}s (last error: {last or 'connection refused'})\n\n"
+        f"3x-ui panel did not answer on {path} within {timeout_seconds}s. "
+        f"Sockets x-ui was listening on: {seen} "
+        f"(expected port {expected_port}).\n\n"
         f"{diagnostics}"
     )
 
@@ -501,6 +588,18 @@ async def bootstrap_node(
                 ),
             )
 
+            # The panel binds to listenIP:port. A listenIP pinned to one
+            # address means loopback is refused, which looks exactly like
+            # "the panel never started". Clear it so it binds every
+            # interface; the firewall, not the bind address, is what keeps
+            # the panel private. Tolerated if the build has no such flag.
+            await conn.run(
+                'x-ui setting -listenIP ""',
+                check=False,
+                timeout=60,
+                input="",
+            )
+
             # Try to force our known web path.
             # Older builds may reject this option, so we don't fail here.
             path_result = await conn.run(
@@ -575,26 +674,18 @@ async def bootstrap_node(
                     str(install_result.stdout or "")
                 ).get("XUI_API_TOKEN") or None
 
-            if actual_port != panel_port:
-
-                raise NodeBootstrapError(
-                    f"3x-ui ignored requested panel port "
-                    f"{panel_port}; actual port is {actual_port}"
-                )
-
             # --------------------------------------------------------
-            # Verify panel locally
+            # Find the panel and verify it locally
             # --------------------------------------------------------
 
-            local_url = (
-                f"http://127.0.0.1:"
-                f"{actual_port}"
-                f"{actual_path}"
-            )
-
-            await _wait_for_panel(
+            # Where the panel *is*, not where the settings table says it
+            # should be. Those disagree whenever 3x-ui declines the port it
+            # was given or an XUI_PORT override is in the service
+            # environment, and the difference used to surface as a bare
+            # "could not connect".
+            panel_scheme, actual_port = await _wait_for_panel(
                 conn,
-                local_url,
+                actual_path,
                 actual_port,
                 # The diagnostics quote the node's own logs; make sure the
                 # panel password can't ride along into an alert row.
@@ -646,7 +737,7 @@ async def bootstrap_node(
                     (
                         'set -- $SSH_CONNECTION; src=$1; '
                         'if [ -n "$src" ]; then '
-                        f'ufw allow from "$src" to any port {panel_port} proto tcp; '
+                        f'ufw allow from "$src" to any port {actual_port} proto tcp; '
                         "else exit 1; fi"
                     ),
                     check=False,
@@ -660,7 +751,7 @@ async def bootstrap_node(
                     # rather than locking ourselves out of the panel.
                     await _run(
                         conn,
-                        f"ufw allow {panel_port}/tcp",
+                        f"ufw allow {actual_port}/tcp",
                     )
 
                 status = await conn.run(
@@ -691,6 +782,7 @@ async def bootstrap_node(
                     ssh_host,
                     actual_port,
                     actual_path,
+                    panel_scheme,
                 ),
                 panel_port=actual_port,
                 panel_web_base_path=actual_path,
