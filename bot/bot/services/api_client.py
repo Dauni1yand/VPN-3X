@@ -86,6 +86,11 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def node_xray_log(self, node_id: str, count: int = 60) -> list[str]:
+        resp = await self._http.get(f"/nodes/{node_id}/xray-log", params={"count": count})
+        resp.raise_for_status()
+        return resp.json()["lines"]
+
     async def rotate_sni(self, node_id: str, admin_telegram_id: int) -> dict:
         resp = await self._http.post(
             f"/nodes/{node_id}/inbound/rotate-sni", params={"admin_telegram_id": admin_telegram_id}

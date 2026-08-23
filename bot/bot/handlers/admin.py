@@ -230,6 +230,36 @@ async def cb_node_rotate_sni(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("a:nlog:"))
+async def cb_node_xray_log(callback: CallbackQuery) -> None:
+    await callback.answer("Читаю логи...")
+    node_id = callback.data.split(":", 2)[2]
+    try:
+        lines = await server_api.node_xray_log(node_id)
+    except httpx.HTTPError as exc:
+        await safe_edit(
+            callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_kb(f"a:nd:{node_id}")
+        )
+        return
+
+    if not lines:
+        body = (
+            "Логи пусты.\n\n"
+            "Если клиент подключается, но интернета нет — это как раз тот случай, "
+            "когда REALITY молча уводит отвергнутого клиента на dest-сайт. "
+            "Попробуйте подключиться и открыть логи снова."
+        )
+    else:
+        # Newest last is how xray writes them; keep that order and show the
+        # tail, trimmed to fit one Telegram message.
+        tail = "\n".join(lines[-25:])
+        body = f"<pre>{html.escape(tail[-3000:])}</pre>"
+
+    await safe_edit(
+        callback.message, f"📄 <b>Логи xray</b>\n\n{body}", kb.back_kb(f"a:nd:{node_id}")
+    )
+
+
 @router.callback_query(F.data.startswith("a:ndel:"))
 async def cb_node_delete_ask(callback: CallbackQuery) -> None:
     await callback.answer()

@@ -120,6 +120,11 @@ def node_detail_kb(node_id: str, has_inbound: bool, status: str) -> InlineKeyboa
         rows.append([btn("🔄 Сменить SNI", f"a:nsni:{node_id}")])
     else:
         rows.append([btn("🔧 Создать инбаунд", f"a:nprov:{node_id}")])
+    if status != "installing":
+        # The only place a rejected REALITY handshake is visible -- the node
+        # silently proxies refused clients to `dest`, so a broken config
+        # looks identical to a working one from the outside.
+        rows.append([btn("📄 Логи xray", f"a:nlog:{node_id}")])
     rows.append([btn("🗑 Удалить ноду", f"a:ndel:{node_id}")])
     rows.append([btn(BACK, "a:nodes:list")])
     return _rows(*rows)

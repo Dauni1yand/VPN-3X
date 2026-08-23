@@ -309,6 +309,66 @@ class ThreeXUIClient:
 
         return self._body(response)
 
+    async def list_xray_versions(self) -> list[str]:
+        """Xray-core releases the panel is willing to install, newest first.
+
+        3x-ui filters this list to >= v26.6.27, so it can move xray forward
+        but never below that floor -- worth knowing before assuming a
+        downgrade is available as a remedy.
+        """
+
+        response = await self._request(
+            "GET",
+            "/panel/api/server/getXrayVersion",
+        )
+
+        body = self._body(response)
+
+        obj = body.get("obj", [])
+
+        return [str(v) for v in obj] if isinstance(obj, list) else []
+
+    async def install_xray(self, version: str) -> None:
+        """Downloads and switches the node to `version` (e.g. "v26.7.28"),
+        restarting xray as part of it. Minutes, not seconds: the panel
+        fetches the release from GitHub."""
+
+        response = await self._request(
+            "POST",
+            f"/panel/api/server/installXray/{version}",
+            timeout=300,
+        )
+
+        self._body(response)
+
+    async def restart_xray(self) -> None:
+
+        response = await self._request(
+            "POST",
+            "/panel/api/server/restartXrayService",
+        )
+
+        self._body(response)
+
+    async def get_xray_logs(self, count: int = 50) -> list[str]:
+        """Recent xray-core log lines from the node.
+
+        The one place a REALITY handshake failure is visible: a client the
+        server rejects is silently proxied to `dest` instead, so from the
+        outside a refused config is indistinguishable from a working one.
+        """
+
+        response = await self._request(
+            "POST",
+            f"/panel/api/server/xraylogs/{int(count)}",
+        )
+
+        body = self._body(response)
+
+        obj = body.get("obj", [])
+
+        return [str(line) for line in obj] if isinstance(obj, list) else []
+
     async def get_client_traffic_by_email(
         self,
         email: str,

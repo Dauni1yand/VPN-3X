@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -37,6 +39,8 @@ from app.services.telegram_notifier import (
 from app.services.threexui_client import (
     get_pooled_client,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def health_check_nodes(ctx) -> None:
@@ -169,6 +173,42 @@ async def health_check_nodes(ctx) -> None:
             )
 
 
+async def _update_xray_to_latest(client, node_id: str) -> str | None:
+    """Puts the node on the newest xray-core the panel offers.
+
+    3x-ui ships whatever xray its release bundled, which can be months
+    behind; REALITY in particular has changed across 26.x, and a node and a
+    client on distant cores negotiate badly.
+
+    Best-effort on purpose. The version list comes from GitHub's API through
+    the node, so a rate limit or a slow network there must not fail an
+    otherwise healthy bootstrap -- the bundled xray still serves traffic.
+    Returns the version installed, or None if it was left alone.
+    """
+
+    try:
+        versions = await client.list_xray_versions()
+    except Exception as exc:  # noqa: BLE001 -- informational, never fatal
+        logger.warning("node %s: could not list xray versions: %s", node_id, exc)
+        return None
+
+    if not versions:
+        logger.warning("node %s: panel offered no xray versions", node_id)
+        return None
+
+    # GitHub returns releases newest first and 3x-ui preserves that order.
+    latest = versions[0]
+
+    try:
+        await client.install_xray(latest)
+    except Exception as exc:  # noqa: BLE001 -- keep the node, keep the bundled core
+        logger.warning("node %s: xray update to %s failed: %s", node_id, latest, exc)
+        return None
+
+    logger.info("node %s: xray updated to %s", node_id, latest)
+    return latest
+
+
 async def bootstrap_node_job(
     ctx,
     node_id: str,
@@ -232,6 +272,12 @@ async def bootstrap_node_job(
             await client.list_inbounds()
 
             # ----------------------------------------------------
+            # Move xray-core to the newest release the panel offers
+            # ----------------------------------------------------
+
+            xray_version = await _update_xray_to_latest(client, node_id)
+
+            # ----------------------------------------------------
             # Create REALITY inbound
             # ----------------------------------------------------
 
@@ -292,10 +338,20 @@ async def bootstrap_node_job(
 
             return
 
+        # The xray version is worth reporting either way: it decides which
+        # clients can negotiate REALITY at all, so "left as bundled" is a
+        # fact the admin wants when a config looks right but won't connect.
+        xray_line = (
+            f"xray-core: {xray_version}"
+            if xray_version
+            else "xray-core: не обновился, осталась версия из сборки 3x-ui"
+        )
+
         await notify_admins(
             f"✅ Нода «{node.name}» "
             f"({node.ip}) полностью готова.\n\n"
             f"3x-ui: {node.panel_base_url}\n"
+            f"{xray_line}\n"
             f"SNI: {inbound.sni}\n"
             f"VPN: VLESS + REALITY / TCP / 443"
         )

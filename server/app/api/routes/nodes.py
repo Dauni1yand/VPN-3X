@@ -18,6 +18,7 @@ from app.services.node_provisioner import (
     rotate_inbound_sni,
 )
 from app.services.queue import get_queue
+from app.services.threexui_client import get_pooled_client
 
 router = APIRouter(prefix="/nodes", tags=["nodes"], dependencies=[Depends(require_internal_api_key)])
 
@@ -210,3 +211,36 @@ async def rotate_sni(node_id: str, admin_telegram_id: int, db: AsyncSession = De
     await db.commit()
     await db.refresh(inbound)
     return inbound
+
+
+@router.get("/{node_id}/xray-log")
+async def node_xray_log(node_id: str, count: int = 60, db: AsyncSession = Depends(get_db)) -> dict:
+    """Recent xray-core lines from the node.
+
+    This is the only place a rejected REALITY handshake shows up. When a
+    client is refused -- wrong shortId, an SNI that isn't in serverNames, a
+    core below minClientVer -- REALITY does not answer with an error; it
+    silently proxies the connection on to `dest`. The client sees a
+    completed TLS handshake and reports the server as reachable while no
+    traffic ever reaches the VPN, so "connects but no internet" is
+    undiagnosable from the client side alone.
+    """
+
+    node = await db.get(Node, node_id)
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node not found")
+    if node.status == NodeStatus.installing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="нода ещё устанавливается, логи появятся после установки",
+        )
+
+    try:
+        lines = await get_pooled_client(node).get_xray_logs(min(max(count, 1), 200))
+    except Exception as exc:  # noqa: BLE001 -- report, don't 500
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"не удалось получить логи с ноды ({type(exc).__name__}: {exc})",
+        ) from exc
+
+    return {"node_id": node_id, "lines": lines}
