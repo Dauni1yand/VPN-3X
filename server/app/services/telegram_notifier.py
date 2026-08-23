@@ -11,9 +11,21 @@ import httpx
 from app.core.config import settings
 
 
+# Telegram rejects a sendMessage over 4096 characters outright. Since
+# delivery failures here are swallowed (one admin being unreachable must not
+# skip the rest), an oversized alert would silently reach nobody -- so a long
+# message is trimmed rather than lost. Node-bootstrap failures carry remote
+# diagnostics and are the realistic way to exceed this.
+MAX_TELEGRAM_MESSAGE = 4096
+_TRUNCATION_NOTE = "\n\n[...сообщение обрезано]"
+
+
 async def notify_admins(text: str) -> None:
     if not settings.telegram_bot_token or not settings.admin_ids:
         return  # not configured yet -- don't fail the caller over it
+
+    if len(text) > MAX_TELEGRAM_MESSAGE:
+        text = text[: MAX_TELEGRAM_MESSAGE - len(_TRUNCATION_NOTE)] + _TRUNCATION_NOTE
 
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     async with httpx.AsyncClient(timeout=10.0) as client:

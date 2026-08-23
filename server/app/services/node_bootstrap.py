@@ -21,6 +21,11 @@ PANEL_PORT = 2053
 COMMAND_TIMEOUT_SECONDS = 900
 CONNECT_TIMEOUT_SECONDS = 20
 LOGIN_TIMEOUT_SECONDS = 60
+# How long 3x-ui gets to open its listener after a restart. `x-ui restart`
+# returns once systemd has started the unit, not once the panel is actually
+# accepting connections, and on a small VPS the gap is more than a few
+# seconds -- especially on first boot, when xray is also starting.
+PANEL_START_TIMEOUT_SECONDS = 90
 
 SNI_CANDIDATES = (
     "www.microsoft.com",
@@ -170,6 +175,111 @@ def _panel_url(
         display_host = f"[{host}]"
 
     return f"http://{display_host}:{port}{path}"
+
+
+async def _panel_diagnostics(
+    conn: asyncssh.SSHClientConnection,
+    port: int,
+    secrets_to_redact: tuple[str, ...] = (),
+) -> str:
+    """Collects why the panel isn't answering, from the node itself.
+
+    Without this a failed bootstrap reports only "could not connect", which
+    is the symptom for a crashed service, a service that never started, a
+    port bound to a different address, and a panel still starting up -- four
+    different problems needing four different fixes.
+    """
+
+    probes = (
+        ("service state", "systemctl is-active x-ui 2>&1; systemctl is-enabled x-ui 2>&1"),
+        ("listening sockets", f"ss -ltnp 2>/dev/null | grep -E ':{port}\\b' || echo '(nothing listening on {port})'"),
+        ("recent log", "journalctl -u x-ui --no-pager -n 40 2>&1 || tail -n 40 /var/log/x-ui/*.log 2>&1"),
+    )
+
+    sections: list[str] = []
+
+    for label, command in probes:
+        try:
+            result = await conn.run(command, check=False, timeout=30, input="")
+            output = (str(result.stdout or "") + str(result.stderr or "")).strip()
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must never mask the real error
+            output = f"(probe failed: {type(exc).__name__}: {exc})"
+
+        for secret in secrets_to_redact:
+            if secret:
+                output = output.replace(secret, "***")
+
+        # Kept tight on purpose: this ends up in a Telegram alert, which is
+        # hard-capped at 4096 characters. Overshoot and the send fails, so
+        # the admin gets nothing at all instead of a truncated clue.
+        sections.append(f"--- {label} ---\n{output[-700:]}")
+
+    return "\n".join(sections)
+
+
+async def _wait_for_panel(
+    conn: asyncssh.SSHClientConnection,
+    url: str,
+    port: int,
+    *,
+    timeout_seconds: int = PANEL_START_TIMEOUT_SECONDS,
+    secrets_to_redact: tuple[str, ...] = (),
+) -> None:
+    """Waits for 3x-ui to actually accept connections.
+
+    `x-ui restart` returns as soon as systemd has started the unit, but the
+    Go process still has to open its listener -- on a small VPS that can take
+    appreciably longer than the few seconds a fixed sleep would allow. A
+    refused connection also fails instantly, so curl's --max-time provides no
+    grace at all; the retry loop is what actually gives the panel time.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    # One restart partway through, in case the first `enable --now` raced the
+    # installer finishing. Cheap, and it fixes the case where the unit came up
+    # before its config was fully written.
+    retry_restart_at = loop.time() + timeout_seconds / 3
+    restarted = False
+
+    last = ""
+
+    while True:
+        result = await conn.run(
+            f"curl -fsS --max-time 10 {shlex.quote(url)} >/dev/null",
+            check=False,
+            timeout=30,
+            input="",
+        )
+
+        if result.exit_status == 0:
+            return
+
+        last = (str(result.stderr or "") + str(result.stdout or "")).strip()
+
+        now = loop.time()
+
+        if now >= deadline:
+            break
+
+        if not restarted and now >= retry_restart_at:
+            restarted = True
+            await conn.run(
+                "systemctl restart x-ui",
+                check=False,
+                timeout=60,
+                input="",
+            )
+
+        await asyncio.sleep(3)
+
+    diagnostics = await _panel_diagnostics(conn, port, secrets_to_redact)
+
+    raise NodeBootstrapError(
+        f"3x-ui did not start listening on {url} within "
+        f"{timeout_seconds}s (last error: {last or 'connection refused'})\n\n"
+        f"{diagnostics}"
+    )
 
 
 async def _pick_node_sni(
@@ -482,15 +592,13 @@ async def bootstrap_node(
                 f"{actual_path}"
             )
 
-            await _run(
+            await _wait_for_panel(
                 conn,
-                (
-                    "curl -fsS "
-                    "--max-time 15 "
-                    f"{shlex.quote(local_url)} "
-                    ">/dev/null"
-                ),
-                timeout=30,
+                local_url,
+                actual_port,
+                # The diagnostics quote the node's own logs; make sure the
+                # panel password can't ride along into an alert row.
+                secrets_to_redact=(panel_password,),
             )
 
             # --------------------------------------------------------

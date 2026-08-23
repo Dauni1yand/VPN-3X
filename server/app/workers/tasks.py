@@ -269,7 +269,11 @@ async def bootstrap_node_job(
                     Alert(
                         node_id=node.id,
                         alert_type="bootstrap_failed",
-                        message=str(exc)[:2000],
+                        # Roomier than the Telegram alert: a bootstrap
+                        # failure carries the node's own systemd state and
+                        # x-ui log, and the alert row is where that is still
+                        # readable after the message has been trimmed.
+                        message=str(exc)[:6000],
                     )
                 )
 
