@@ -239,6 +239,11 @@ async def bootstrap_node_job(
                 await provision_default_inbound(
                     node,
                     sni=bootstrap_result.sni,
+                    # We just installed 3x-ui on this box and reset its
+                    # panel credentials; anything left on tcp/443 is ours
+                    # to replace -- usually our own leftover from an
+                    # earlier bootstrap of the same machine.
+                    takeover=True,
                 )
             )
 

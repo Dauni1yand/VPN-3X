@@ -61,7 +61,26 @@ async def provision_default_inbound(
     node: Node,
     *,
     sni: str | None = None,
+    takeover: bool = False,
 ) -> Inbound:
+    """Gives `node` its VLESS+REALITY inbound on tcp/443.
+
+    `takeover` says whether an inbound already on that port may be claimed
+    even when it has clients on it. The two callers differ genuinely:
+
+      * bootstrap (takeover=True) has just run the 3x-ui installer on this
+        box over SSH and forced its panel credentials, port and base path.
+        It has already assumed ownership of the machine, so balking at a
+        leftover inbound -- usually from an earlier bootstrap of the same
+        box, since /etc/x-ui/x-ui.db survives a re-install -- would be
+        inconsistent with everything it just did.
+
+      * the manual "создать инбаунд" button (takeover=False) is typically
+        used on a panel that was connected, not installed, by us. Its
+        clients may be real users, and cutting them off silently is not
+        ours to do.
+    """
+
 
     if sni is None:
         sni = await pick_working_sni()
@@ -105,7 +124,7 @@ async def provision_default_inbound(
     if occupying is not None:
         clients = _client_count(occupying)
 
-        if clients:
+        if clients and not takeover:
             # Someone's users live on it. Overwriting would cut them off
             # silently, so make the admin decide instead.
             raise InboundPortInUseError(
@@ -115,10 +134,11 @@ async def provision_default_inbound(
                 f"first if this node should be managed by VPN-3X."
             )
 
-        # Empty: a placeholder, or a leftover from an earlier bootstrap of
-        # this same box. Take it over in place rather than delete-then-create,
-        # which would leave the node with no inbound at all if the create leg
-        # failed.
+        # Take it over in place rather than delete-then-create, which would
+        # leave the node with no inbound at all if the create leg failed.
+        # Any clients on it go with the old REALITY keys: their configs stop
+        # working either way once the keypair is replaced, so keeping the
+        # rows would only be misleading.
         remote_id = int(occupying["id"])
         await threexui.update_inbound(remote_id, payload)
 
