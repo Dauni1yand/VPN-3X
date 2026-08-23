@@ -103,8 +103,17 @@ async def _run(
 def _extract_setting(
     output: str,
     name: str,
-    default: str = "",
-) -> str:
+) -> str | None:
+    """Reads one `name: value` line out of `x-ui setting -show true`.
+
+    Returns None when the line is absent. It deliberately does NOT fall back
+    to a caller-supplied default: doing that hid a real failure for a long
+    time. `/usr/bin/x-ui` is a management shell script whose argument
+    dispatcher has no `setting` case, so `x-ui setting -show true` prints its
+    help menu and exits 0. Every field then "defaulted" to what we had asked
+    for, and the bootstrap went on believing the panel sat on a port and path
+    it had never actually been moved to.
+    """
 
     match = re.search(
         rf"(?m)^\s*{re.escape(name)}:\s*(.+?)\s*$",
@@ -112,9 +121,39 @@ def _extract_setting(
     )
 
     if not match:
-        return default
+        return None
 
     return match.group(1).strip()
+
+
+async def _find_xui_binary(conn: asyncssh.SSHClientConnection) -> str:
+    """Locates the x-ui Go binary.
+
+    `/usr/bin/x-ui` is the interactive management script, not the binary --
+    it understands start/stop/restart/status and prints its help menu for
+    anything else, including `setting` and `migrate`, while still exiting 0.
+    The installer itself always calls "${xui_folder}/x-ui setting ...", so
+    that is the path that actually applies configuration.
+    """
+
+    result = await conn.run(
+        "for p in /usr/local/x-ui/x-ui /usr/local/x-ui/bin/x-ui /opt/x-ui/x-ui; do "
+        '[ -x "$p" ] && echo "$p" && exit 0; done; exit 1',
+        check=False,
+        timeout=30,
+        input="",
+    )
+
+    path = str(result.stdout or "").strip().splitlines()
+
+    if result.exit_status != 0 or not path:
+        raise NodeBootstrapError(
+            "could not find the x-ui binary on the node "
+            "(looked in /usr/local/x-ui, /opt/x-ui) -- "
+            "the 3x-ui install did not lay out as expected"
+        )
+
+    return path[0]
 
 
 def _parse_install_result(output: str) -> dict[str, str]:
@@ -196,7 +235,16 @@ async def _panel_diagnostics(
         # Every socket x-ui owns, not just the port we hoped for -- if the
         # panel came up somewhere else this is the line that says where.
         ("x-ui sockets", "ss -ltnp 2>/dev/null | grep x-ui || echo '(x-ui owns no listening socket)'"),
-        ("configured listen", "x-ui setting -getListen 2>&1 | tail -3"),
+        # Via the binary, not /usr/bin/x-ui: the management script answers
+        # unknown subcommands with its help menu, which is what this probe
+        # used to report instead of the setting.
+        (
+            "panel settings",
+            "for p in /usr/local/x-ui/x-ui /usr/local/x-ui/bin/x-ui /opt/x-ui/x-ui; do "
+            '[ -x "$p" ] && "$p" setting -show true 2>&1 '
+            "| grep -aiE 'port|webBasePath|listen|cert' | head -8 && exit 0; done; "
+            "echo '(x-ui binary not found)'",
+        ),
         # Targeted, not a blind tail: the bind line and any error are what
         # matter, and a truncated tail was cutting exactly those off.
         (
@@ -272,44 +320,64 @@ async def _xui_listeners(
     return found
 
 
+# Any of these means "a web server answered here". 404 deliberately is not
+# in the list: it means the socket is the panel's but the base path is wrong.
+_PANEL_OK_STATUSES = ("200", "301", "302", "303", "307", "308", "401", "403")
+
+
 async def _probe_panel(
     conn: asyncssh.SSHClientConnection,
     host: str,
     port: int,
-    path: str,
-) -> str | None:
-    """Returns the scheme that answered ("http"/"https"), or None. Tries
-    HTTPS as well as HTTP:
-    3x-ui serves TLS whenever a certificate is configured, and -k accepts the
-    self-signed one it may have generated for itself."""
+    paths: tuple[str, ...],
+) -> tuple[str, str] | None:
+    """Finds the panel on one socket. Returns (scheme, path), or None.
+
+    Both the scheme and the base path have to be discovered rather than
+    assumed. 3x-ui serves TLS whenever a certificate is configured (-k
+    accepts the self-signed one it generates for itself), and the base path
+    it ends up serving is not necessarily the one we asked for.
+
+    The status code is what decides, not curl's exit code: -f would collapse
+    "wrong base path" (404) and "no panel here" into the same failure, and
+    those need different responses -- try another path versus try another
+    socket. Anything that is not a 404 is the panel answering, including the
+    401/403 an authenticated route returns before login.
+    """
 
     for scheme in ("http", "https"):
-        url = f"{scheme}://{host}:{port}{path}"
-        result = await conn.run(
-            f"curl -fsSk --max-time 10 {shlex.quote(url)} >/dev/null",
-            check=False,
-            timeout=30,
-            input="",
-        )
-        if result.exit_status == 0:
-            return scheme
+        for path in paths:
+            url = f"{scheme}://{host}:{port}{path}"
+            result = await conn.run(
+                "curl -sk -o /dev/null -w '%{http_code}' "
+                f"--max-time 10 {shlex.quote(url)}",
+                check=False,
+                timeout=30,
+                input="",
+            )
+
+            status = str(result.stdout or "").strip()
+
+            if status in _PANEL_OK_STATUSES:
+                return scheme, path
 
     return None
 
 
 async def _wait_for_panel(
     conn: asyncssh.SSHClientConnection,
-    path: str,
+    paths: tuple[str, ...],
     expected_port: int,
     *,
     timeout_seconds: int = PANEL_START_TIMEOUT_SECONDS,
     secrets_to_redact: tuple[str, ...] = (),
-) -> tuple[str, int]:
+) -> tuple[str, int, str]:
     """Waits for the 3x-ui panel to answer and reports where it actually is.
 
-    Returns (scheme, port). Both can differ from what was asked for: what
-    the settings table says and what the process bound are not the same
-    thing, and the panel serves TLS whenever a certificate is configured.
+    Returns (scheme, port, path). All three can differ from what was asked
+    for: what the settings table says and what the process bound are not the
+    same thing, the panel serves TLS whenever a certificate is configured,
+    and the base path it ends up serving need not be the one we requested.
 
     `x-ui restart` returns as soon as systemd has started the unit, but the
     Go process still has to open its listener -- on a small VPS that gap is
@@ -337,9 +405,10 @@ async def _wait_for_panel(
         )
 
         for host, port in candidates:
-            scheme = await _probe_panel(conn, host, port, path)
-            if scheme is not None:
-                return scheme, port
+            found = await _probe_panel(conn, host, port, paths)
+            if found is not None:
+                scheme, path = found
+                return scheme, port, path
 
         now = loop.time()
 
@@ -361,10 +430,12 @@ async def _wait_for_panel(
 
     seen = ", ".join(f"{h}:{p}" for h, p in listeners) or "none"
 
+    tried = ", ".join(paths) or "(none)"
+
     raise NodeBootstrapError(
-        f"3x-ui panel did not answer on {path} within {timeout_seconds}s. "
-        f"Sockets x-ui was listening on: {seen} "
-        f"(expected port {expected_port}).\n\n"
+        f"3x-ui panel did not answer within {timeout_seconds}s. "
+        f"Sockets x-ui was listening on: {seen} (expected port "
+        f"{expected_port}). Base paths tried: {tried}.\n\n"
         f"{diagnostics}"
     )
 
@@ -568,9 +639,16 @@ async def bootstrap_node(
                 "systemctl enable --now x-ui",
             )
 
+            # Everything below must go through the Go binary, never
+            # /usr/bin/x-ui: that one is the management shell script, and it
+            # silently prints its help menu (exit 0) for `setting` and
+            # `migrate`, so those calls looked like they succeeded while
+            # changing nothing at all.
+            xui = shlex.quote(await _find_xui_binary(conn))
+
             await _run(
                 conn,
-                "x-ui migrate",
+                f"{xui} migrate",
                 timeout=120,
             )
 
@@ -581,85 +659,54 @@ async def bootstrap_node(
             await _run(
                 conn,
                 (
-                    "x-ui setting "
+                    f"{xui} setting "
                     f"-username {shlex.quote(panel_login)} "
                     f"-password {shlex.quote(panel_password)} "
-                    f"-port {panel_port}"
+                    f"-port {panel_port} "
+                    f"-webBasePath {shlex.quote(web_base_path)}"
                 ),
             )
 
             # The panel binds to listenIP:port. A listenIP pinned to one
             # address means loopback is refused, which looks exactly like
-            # "the panel never started". Clear it so it binds every
+            # "the panel never started" -- and the installer does pin it to
+            # 127.0.0.1 in some SSL modes. Clear it so it binds every
             # interface; the firewall, not the bind address, is what keeps
             # the panel private. Tolerated if the build has no such flag.
             await conn.run(
-                'x-ui setting -listenIP ""',
+                f'{xui} setting -listenIP ""',
                 check=False,
                 timeout=60,
                 input="",
             )
-
-            # Try to force our known web path.
-            # Older builds may reject this option, so we don't fail here.
-            path_result = await conn.run(
-                (
-                    "x-ui setting "
-                    f"-webBasePath {shlex.quote(web_base_path)}"
-                ),
-                check=False,
-                timeout=60,
-                input="",
-            )
-
-            _ = path_result
 
             await _run(
                 conn,
-                "x-ui restart",
+                "systemctl restart x-ui",
                 timeout=120,
             )
-
-            await asyncio.sleep(3)
 
             # --------------------------------------------------------
             # Read actual 3x-ui settings
             # --------------------------------------------------------
 
-            settings_result = await _run(
-                conn,
-                "x-ui setting -show true",
+            settings_result = await conn.run(
+                f"{xui} setting -show true",
+                check=False,
                 timeout=60,
+                input="",
             )
 
-            settings_output = str(
-                settings_result.stdout or ""
-            )
+            settings_output = str(settings_result.stdout or "")
 
-            actual_port = int(
-                _extract_setting(
-                    settings_output,
-                    "port",
-                    str(panel_port),
-                )
-            )
+            reported_port = _extract_setting(settings_output, "port")
+            reported_path = _extract_setting(settings_output, "webBasePath")
 
-            actual_path = _normalize_web_base_path(
-                _extract_setting(
-                    settings_output,
-                    "webBasePath",
-                    web_base_path,
-                )
-            )
-
-            # The installer also drops a machine-readable record of the
-            # install at /etc/x-ui/install-result.env. Port/webBasePath there
-            # are the installer's values, which the forced `x-ui setting`
-            # calls above may have since overridden -- `-show true` is newer,
-            # so it stays authoritative for those. The API token is the one
-            # thing only this file carries, and only this once: the panel
-            # keeps just its SHA-256 hash, so a token not captured here can
-            # never be read back, only replaced.
+            # The installer also records what it actually applied in
+            # /etc/x-ui/install-result.env. That file is the only place the
+            # API token is ever exposed -- the panel keeps just its SHA-256
+            # hash, so a token not captured here can never be read back, only
+            # replaced -- and it is a useful second opinion on port/path.
             install_result = await conn.run(
                 "cat /etc/x-ui/install-result.env",
                 check=False,
@@ -667,25 +714,47 @@ async def bootstrap_node(
                 input="",
             )
 
-            api_token: str | None = None
+            applied: dict[str, str] = {}
 
             if install_result.exit_status == 0:
-                api_token = _parse_install_result(
+                applied = _parse_install_result(
                     str(install_result.stdout or "")
-                ).get("XUI_API_TOKEN") or None
+                )
+
+            api_token = applied.get("XUI_API_TOKEN") or None
+
+            actual_port = (
+                int(reported_port)
+                if reported_port and reported_port.isdigit()
+                else panel_port
+            )
 
             # --------------------------------------------------------
             # Find the panel and verify it locally
             # --------------------------------------------------------
 
-            # Where the panel *is*, not where the settings table says it
-            # should be. Those disagree whenever 3x-ui declines the port it
-            # was given or an XUI_PORT override is in the service
-            # environment, and the difference used to surface as a bare
-            # "could not connect".
-            panel_scheme, actual_port = await _wait_for_panel(
+            # Every base path worth trying, best guess first. None of these
+            # is trusted: whichever one the panel actually answers on wins.
+            # A wrong guess here is invisible -- it just 404s -- which is how
+            # a panel that was up the whole time read as "never started".
+            candidate_paths: list[str] = []
+
+            for candidate in (
+                reported_path,
+                applied.get("XUI_WEB_BASE_PATH"),
+                web_base_path,
+                "/",
+            ):
+                if not candidate:
+                    continue
+                normalized = _normalize_web_base_path(candidate)
+                if normalized not in candidate_paths:
+                    candidate_paths.append(normalized)
+
+            # Where the panel *is*, not where the settings say it should be.
+            panel_scheme, actual_port, actual_path = await _wait_for_panel(
                 conn,
-                actual_path,
+                tuple(candidate_paths),
                 actual_port,
                 # The diagnostics quote the node's own logs; make sure the
                 # panel password can't ride along into an alert row.
