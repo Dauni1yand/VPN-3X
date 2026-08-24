@@ -124,6 +124,7 @@ def node_detail_kb(node_id: str, has_inbound: bool, status: str) -> InlineKeyboa
         # The only place a rejected REALITY handshake is visible -- the node
         # silently proxies refused clients to `dest`, so a broken config
         # looks identical to a working one from the outside.
+        rows.append([btn("🩺 Диагностика", f"a:ndiag:{node_id}")])
         rows.append([btn("📄 Логи xray", f"a:nlog:{node_id}")])
     rows.append([btn("🗑 Удалить ноду", f"a:ndel:{node_id}")])
     rows.append([btn(BACK, "a:nodes:list")])

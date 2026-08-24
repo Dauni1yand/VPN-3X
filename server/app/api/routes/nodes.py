@@ -12,6 +12,7 @@ from app.schemas.inbounds import InboundOut
 from app.schemas.nodes import NodeBootstrapRequest, NodeCreate, NodeCredentialsUpdate, NodeOut
 from app.services.audit import log_admin_action
 from app.services.node_bootstrap import PANEL_PORT
+from app.services.node_doctor import diagnose_node
 from app.services.node_provisioner import (
     InboundPortInUseError,
     provision_default_inbound,
@@ -244,3 +245,25 @@ async def node_xray_log(node_id: str, count: int = 60, db: AsyncSession = Depend
         ) from exc
 
     return {"node_id": node_id, "lines": lines}
+
+
+@router.get("/{node_id}/diagnose")
+async def diagnose(node_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Diffs what the node actually serves against what we handed out.
+
+    See node_doctor: every REALITY rejection looks the same from a client --
+    a completed handshake, a latency reading, no traffic -- so the useful
+    question is whether the node's inbound still matches the configs in
+    circulation, not whether the node is reachable.
+    """
+
+    node = await db.get(Node, node_id)
+    if node is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="node not found")
+    if node.status == NodeStatus.installing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="нода ещё устанавливается, диагностика будет доступна после установки",
+        )
+
+    return await diagnose_node(db, node)

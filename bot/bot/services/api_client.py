@@ -91,6 +91,11 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()["lines"]
 
+    async def diagnose_node(self, node_id: str) -> dict:
+        resp = await self._http.get(f"/nodes/{node_id}/diagnose", timeout=45)
+        resp.raise_for_status()
+        return resp.json()
+
     async def rotate_sni(self, node_id: str, admin_telegram_id: int) -> dict:
         resp = await self._http.post(
             f"/nodes/{node_id}/inbound/rotate-sni", params={"admin_telegram_id": admin_telegram_id}

@@ -230,6 +230,51 @@ async def cb_node_rotate_sni(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("a:ndiag:"))
+async def cb_node_diagnose(callback: CallbackQuery) -> None:
+    await callback.answer("Проверяю ноду...")
+    node_id = callback.data.split(":", 2)[2]
+    await safe_edit(callback.message, "🩺 Сверяю конфигурацию ноды с выданными конфигами...")
+    try:
+        report = await server_api.diagnose_node(node_id)
+    except httpx.HTTPError as exc:
+        await safe_edit(
+            callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_kb(f"a:nd:{node_id}")
+        )
+        return
+
+    problems = report.get("problems") or []
+    inbound = report.get("inbound") or {}
+    clients = report.get("clients") or {}
+    online = report.get("online_now")
+
+    if problems:
+        head = "🔴 <b>Найдены расхождения</b>\n\n" + "\n\n".join(
+            f"• {html.escape(str(p))}" for p in problems
+        )
+    else:
+        head = (
+            "🟢 <b>Нода отдаёт ровно то, что записано в выданных конфигах.</b>\n\n"
+            "Значит проблема не в настройке ноды. Смотрите строку «Онлайн» ниже: "
+            "если при подключённом клиенте там пусто — рукопожатие не проходит "
+            "и клиент уходит на dest-сайт; если клиент есть — туннель работает, "
+            "и дело в маршрутизации на устройстве."
+        )
+
+    facts = (
+        f"\n\n<b>Инбаунд на ноде</b>\n"
+        f"порт: {inbound.get('port')} · {inbound.get('security')}/{inbound.get('network')}\n"
+        f"serverNames: {html.escape(str(inbound.get('serverNames')))}\n"
+        f"shortIds: {html.escape(str(inbound.get('shortIds')))}\n"
+        f"minClientVer: {html.escape(str(inbound.get('minClientVer')))}\n"
+        f"\n<b>Клиенты</b>: у нас {clients.get('ours_active')}, "
+        f"на ноде {clients.get('on_node')}, отсутствуют {clients.get('missing_on_node')}\n"
+        f"<b>Онлайн сейчас</b>: {html.escape(str(online))}"
+    )
+
+    await safe_edit(callback.message, head + facts, kb.back_kb(f"a:nd:{node_id}"))
+
+
 @router.callback_query(F.data.startswith("a:nlog:"))
 async def cb_node_xray_log(callback: CallbackQuery) -> None:
     await callback.answer("Читаю логи...")
