@@ -20,13 +20,15 @@ class AddNode(StatesGroup):
 
 
 class ConnectNode(StatesGroup):
-    """A server that already runs 3x-ui -- we just point at its panel."""
+    """A server already running remnawave-node -- we only register it.
+
+    Three steps rather than the six 3x-ui needed. There is no per-node panel
+    to point at any more: the panel is the deployment's, configured once in
+    .env, so there is no URL, login or password to ask for.
+    """
 
     name = State()
     ip = State()
-    panel_url = State()
-    login = State()
-    password = State()
     country = State()
 
 

@@ -46,12 +46,26 @@ def _format_expiry(iso_ts: str) -> str:
 
 
 def _config_text(client: dict) -> str:
-    return (
+    text = (
         "🔑 <b>Ваш конфиг</b>\n\n"
         f"Действует до: <b>{_format_expiry(client['expires_at'])}</b>\n\n"
         "Скопируйте ссылку и вставьте её в приложение:\n"
         f"<code>{html.escape(client['vless_uri'])}</code>"
     )
+
+    # Offered second, not instead. A subscription keeps working when the
+    # node's parameters change -- the app re-reads it -- which a pasted
+    # vless:// link cannot. But not every client app accepts one, so the
+    # link that always works stays first.
+    subscription = client.get("subscription_url")
+    if subscription:
+        text += (
+            "\n\n<b>Ссылка-подписка</b> (если приложение её поддерживает — "
+            "конфиг будет обновляться сам):\n"
+            f"<code>{html.escape(subscription)}</code>"
+        )
+
+    return text
 
 
 @router.message(CommandStart())

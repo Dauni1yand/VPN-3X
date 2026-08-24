@@ -89,7 +89,7 @@ def nodes_menu_kb() -> InlineKeyboardMarkup:
     return _rows(
         [btn("📋 Список нод", "a:nodes:list")],
         [btn("➕ Добавить ноду (с нуля)", "a:nodes:add")],
-        [btn("🔗 Подключить готовую 3x-ui", "a:nodes:connect")],
+        [btn("🔗 Подключить готовую ноду", "a:nodes:connect")],
         [btn(BACK, "a:menu")],
     )
 
@@ -125,7 +125,7 @@ def node_detail_kb(node_id: str, has_inbound: bool, status: str) -> InlineKeyboa
         # silently proxies refused clients to `dest`, so a broken config
         # looks identical to a working one from the outside.
         rows.append([btn("🩺 Диагностика", f"a:ndiag:{node_id}")])
-        rows.append([btn("📄 Логи xray", f"a:nlog:{node_id}")])
+        rows.append([btn("📄 Состояние в панели", f"a:nlog:{node_id}")])
     rows.append([btn("🗑 Удалить ноду", f"a:ndel:{node_id}")])
     rows.append([btn(BACK, "a:nodes:list")])
     return _rows(*rows)

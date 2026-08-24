@@ -34,23 +34,13 @@ class ServerAPIClient:
         return resp.json()
 
     async def add_node(
-        self,
-        name: str,
-        ip: str,
-        panel_base_url: str,
-        panel_login: str,
-        panel_password: str,
-        country: str | None,
-        admin_telegram_id: int,
+        self, name: str, ip: str, country: str | None, admin_telegram_id: int
     ) -> dict:
         resp = await self._http.post(
             "/nodes",
             json={
                 "name": name,
                 "ip": ip,
-                "panel_base_url": panel_base_url,
-                "panel_login": panel_login,
-                "panel_password": panel_password,
                 "country": country,
                 "admin_telegram_id": admin_telegram_id,
             },
@@ -86,10 +76,17 @@ class ServerAPIClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def node_xray_log(self, node_id: str, count: int = 60) -> list[str]:
-        resp = await self._http.get(f"/nodes/{node_id}/xray-log", params={"count": count})
+    async def node_status(self, node_id: str) -> dict:
+        """What the panel knows about the node's Xray.
+
+        Not logs: Remnawave's API does not expose the node's xray log, which
+        lives in the node's own container. The endpoint says as much and
+        returns the panel's view instead.
+        """
+
+        resp = await self._http.get(f"/nodes/{node_id}/xray-log")
         resp.raise_for_status()
-        return resp.json()["lines"]
+        return resp.json()
 
     async def diagnose_node(self, node_id: str) -> dict:
         resp = await self._http.get(f"/nodes/{node_id}/diagnose", timeout=45)

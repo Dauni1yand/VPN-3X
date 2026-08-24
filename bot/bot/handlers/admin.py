@@ -277,31 +277,39 @@ async def cb_node_diagnose(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("a:nlog:"))
 async def cb_node_xray_log(callback: CallbackQuery) -> None:
-    await callback.answer("Читаю логи...")
+    await callback.answer("Спрашиваю панель...")
     node_id = callback.data.split(":", 2)[2]
     try:
-        lines = await server_api.node_xray_log(node_id)
+        payload = await server_api.node_status(node_id)
     except httpx.HTTPError as exc:
         await safe_edit(
             callback.message, f"❌ Не получилось: {_api_error(exc)}", kb.back_kb(f"a:nd:{node_id}")
         )
         return
 
-    if not lines:
-        body = (
-            "Логи пусты.\n\n"
-            "Если клиент подключается, но интернета нет — это как раз тот случай, "
-            "когда REALITY молча уводит отвергнутого клиента на dest-сайт. "
-            "Попробуйте подключиться и открыть логи снова."
-        )
-    else:
-        # Newest last is how xray writes them; keep that order and show the
-        # tail, trimmed to fit one Telegram message.
-        tail = "\n".join(lines[-25:])
-        body = f"<pre>{html.escape(tail[-3000:])}</pre>"
+    state = payload.get("status") or {}
+
+    connected = "да" if state.get("isConnected") else "нет"
+    lines = [
+        f"Подключена: <b>{connected}</b>",
+        f"Отключена вручную: {'да' if state.get('isDisabled') else 'нет'}",
+        f"xray: {html.escape(str(state.get('xrayVersion') or '—'))}",
+        f"remnawave-node: {html.escape(str(state.get('nodeVersion') or '—'))}",
+        f"Онлайн сейчас: {state.get('usersOnline') if state.get('usersOnline') is not None else '—'}",
+    ]
+    if state.get("lastStatusMessage"):
+        lines.append(f"\nПоследнее сообщение:\n<code>{html.escape(str(state['lastStatusMessage']))}</code>")
+
+    # Said plainly rather than left as an empty log view: the panel does not
+    # have the node's xray log, so the admin needs the command that does.
+    hint = payload.get("raw_logs_hint")
+    if hint:
+        lines.append(f"\n<i>{html.escape(str(hint))}</i>")
 
     await safe_edit(
-        callback.message, f"📄 <b>Логи xray</b>\n\n{body}", kb.back_kb(f"a:nd:{node_id}")
+        callback.message,
+        "📄 <b>Состояние ноды в панели</b>\n\n" + "\n".join(lines),
+        kb.back_kb(f"a:nd:{node_id}"),
     )
 
 
@@ -426,7 +434,7 @@ async def _run_bootstrap(
         f"🚀 <b>Установка запущена</b>\n\n"
         f"Нода: {html.escape(node['name'])}\n"
         f"IP: <code>{node['ip']}</code>\n\n"
-        "Она уже видна в списке со статусом ⏳. Установка 3x-ui занимает "
+        "Она уже видна в списке со статусом ⏳. Установка занимает "
         "несколько минут — я пришлю отдельное сообщение, когда нода "
         "заработает или если что-то пойдёт не так. Чат можно закрыть.",
         "a:nodes",
@@ -445,7 +453,7 @@ async def add_node_skip_country(callback: CallbackQuery, state: FSMContext) -> N
 
 
 # --------------------------------------------------------------------------
-# Nodes -- connect a server that already runs 3x-ui
+# Nodes -- register a server that already runs remnawave-node
 # --------------------------------------------------------------------------
 
 
@@ -456,8 +464,8 @@ async def cb_connect_node(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ConnectNode.name)
     await safe_edit(
         callback.message,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 1 из 6)\n\n"
-        "Для сервера, где 3x-ui уже установлен вручную.\n\n"
+        "🔗 <b>Подключить готовую ноду</b> (шаг 1 из 3)\n\n"
+        "Для сервера, где контейнер <code>remnanode</code> уже запущен вручную.\n\n"
         "Введите <b>название</b> ноды, например: <code>de-old</code>",
         kb.cancel_kb(),
     )
@@ -470,7 +478,7 @@ async def connect_node_name(message: Message, state: FSMContext) -> None:
     await _panel(
         message,
         state,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 2 из 6)\n\n"
+        "🔗 <b>Подключить готовую ноду</b> (шаг 2 из 3)\n\n"
         "Введите <b>IP-адрес</b> сервера, например: <code>203.0.113.10</code>",
         kb.cancel_kb(),
     )
@@ -489,53 +497,11 @@ async def connect_node_ip(message: Message, state: FSMContext) -> None:
         )
         return
     await state.update_data(ip=ip)
-    await state.set_state(ConnectNode.panel_url)
-    await _panel(
-        message,
-        state,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 3 из 6)\n\n"
-        "Введите <b>адрес панели</b> 3x-ui вместе с портом.\n\n"
-        f"Например: <code>http://{html.escape(ip)}:2053</code>",
-        kb.cancel_kb(),
-    )
-
-
-@router.message(ConnectNode.panel_url, F.text)
-async def connect_node_panel(message: Message, state: FSMContext) -> None:
-    await state.update_data(panel_url=message.text.strip())
-    await state.set_state(ConnectNode.login)
-    await _panel(
-        message,
-        state,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 4 из 6)\n\n"
-        "Введите <b>логин</b> от панели 3x-ui.",
-        kb.cancel_kb(),
-    )
-
-
-@router.message(ConnectNode.login, F.text)
-async def connect_node_login(message: Message, state: FSMContext) -> None:
-    await state.update_data(login=message.text.strip())
-    await state.set_state(ConnectNode.password)
-    await _panel(
-        message,
-        state,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 5 из 6)\n\n"
-        "Введите <b>пароль</b> от панели 3x-ui.\n\n"
-        "🔒 Сообщение с паролем я сразу удалю; в базе он хранится зашифрованным.",
-        kb.cancel_kb(),
-    )
-
-
-@router.message(ConnectNode.password, F.text)
-async def connect_node_password(message: Message, state: FSMContext) -> None:
-    await state.update_data(password=message.text.strip())
-    await _scrub(message)
     await state.set_state(ConnectNode.country)
     await _panel(
         message,
         state,
-        "🔗 <b>Подключить готовую ноду</b> (шаг 6 из 6)\n\n"
+        "🔗 <b>Подключить готовую ноду</b> (шаг 3 из 3)\n\n"
         "Введите <b>код страны</b>, например <code>NL</code>.",
         kb.skip_or_cancel_kb(),
     )
@@ -546,15 +512,11 @@ async def _run_connect_node(
 ) -> None:
     data = await state.get_data()
     try:
-        node = await server_api.add_node(
-            data["name"],
-            data["ip"],
-            data["panel_url"],
-            data["login"],
-            data["password"],
-            country,
-            admin_id,
-        )
+        node = await server_api.add_node(data["name"], data["ip"], country, admin_id)
+        # Recording the row is only half of it: until the node has a config
+        # profile, a squad and a registration in the panel, it serves
+        # nothing and the balancer must not pick it.
+        await server_api.provision_inbound(node["id"], admin_id)
     except httpx.HTTPError as exc:
         await _finish(message, state, f"❌ Не получилось: {_api_error(exc)}", "a:nodes")
         return
@@ -1028,8 +990,7 @@ async def cf_skip_ip(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(
     StateFilter(
         AddNode.name, AddNode.ip, AddNode.ssh_password, AddNode.country,
-        ConnectNode.name, ConnectNode.ip, ConnectNode.panel_url,
-        ConnectNode.login, ConnectNode.password, ConnectNode.country,
+        ConnectNode.name, ConnectNode.ip, ConnectNode.country,
         IssueConfig.telegram_id, IssueConfig.hours,
         MigrateClient.client_id,
         SingleValue.value,
