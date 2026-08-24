@@ -51,54 +51,86 @@ services:
 
   # --- Remnawave panel ------------------------------------------------------
   # Optional: `docker compose --profile remnawave up -d` runs the panel here,
-  # alongside the main server. Leave the profile off and point
-  # REMNAWAVE_BASE_URL at a panel you already run instead -- nothing else in
-  # the stack cares which of the two it is.
+  # alongside the main server. install.sh does this for you. Leave the profile
+  # off and point REMNAWAVE_BASE_URL at a panel you already run instead --
+  # nothing else in the stack cares which of the two it is.
   #
-  # The panel keeps its own database. Sharing ours would mean its migrations
-  # and ours writing to one schema, and its upgrades are not ours to
-  # coordinate.
+  # Wiring follows remnawave/backend's own docker-compose-prod.yml: the image
+  # is pinned to the major, Valkey is reached over a unix socket in a shared
+  # volume rather than TCP (the container runs with --port 0), and the panel's
+  # health endpoint lives on the metrics port.
+  #
+  # These read .env.remnawave, NOT our .env. The panel has its own
+  # TELEGRAM_BOT_TOKEN, and handing it our file would quietly give the panel
+  # our bot's token. It also keeps the panel's database credentials separate
+  # from ours, which is the point of it having its own database at all.
   remnawave-db:
-    image: postgres:17
+    image: postgres:18.4
+    hostname: remnawave-db
     profiles: ["remnawave"]
+    shm_size: 512mb
+    restart: always
+    env_file: .env.remnawave
     environment:
-      POSTGRES_USER: ${REMNAWAVE_DB_USER:-remnawave}
-      POSTGRES_PASSWORD: ${REMNAWAVE_DB_PASSWORD:-remnawave}
-      POSTGRES_DB: ${REMNAWAVE_DB_NAME:-remnawave}
+      TZ: UTC   # the panel requires its database in UTC
     volumes:
-      - remnawave-db-data:/var/lib/postgresql/data
+      - remnawave-db-data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${REMNAWAVE_DB_USER:-remnawave}"]
-      interval: 5s
-      timeout: 5s
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 10s
       retries: 10
 
   remnawave-redis:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey:9-alpine
+    hostname: remnawave-redis
     profiles: ["remnawave"]
+    restart: always
     volumes:
-      - remnawave-redis-data:/data
+      - valkey-socket:/var/run/valkey
+    command: >
+      valkey-server
+      --save ""
+      --appendonly no
+      --maxmemory-policy noeviction
+      --loglevel warning
+      --unixsocket /var/run/valkey/valkey.sock
+      --unixsocketperm 777
+      --port 0
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-s", "/var/run/valkey/valkey.sock", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   remnawave:
-    image: remnawave/backend:latest
+    image: remnawave/backend:3
+    hostname: remnawave
     profiles: ["remnawave"]
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql://${REMNAWAVE_DB_USER:-remnawave}:${REMNAWAVE_DB_PASSWORD:-remnawave}@remnawave-db:5432/${REMNAWAVE_DB_NAME:-remnawave}
-      REDIS_HOST: remnawave-redis
-      REDIS_PORT: 6379
+    restart: always
+    env_file: .env.remnawave
+    volumes:
+      - valkey-socket:/var/run/valkey
     # Published on loopback only: the panel's admin UI and API must not be
-    # reachable from the internet on a bare port. Put it behind the same
-    # reverse proxy as the main server if you want to reach it remotely.
+    # reachable from the internet on a bare port. Our own server reaches it
+    # as http://remnawave:3000 over the compose network, which needs no
+    # published port at all -- this is here so an admin can tunnel in with
+    # `ssh -L 3000:127.0.0.1:3000`.
     ports:
       - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     depends_on:
       remnawave-db:
         condition: service_healthy
       remnawave-redis:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   db-data:
   remnawave-db-data:
-  remnawave-redis-data:
+  valkey-socket:

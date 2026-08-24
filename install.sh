@@ -4,6 +4,10 @@ set -Eeuo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${APP_DIR}/.env"
 COMPOSE_FILE="${APP_DIR}/docker-compose.yml"
+# Set once we know whether this deployment runs the Remnawave panel itself.
+# Every command that brings the stack up needs it, including the systemd
+# unit -- without it the panel is simply absent after a reboot.
+COMPOSE_PROFILE_ARGS=""
 
 log() {
     echo
@@ -349,37 +353,100 @@ set_env SERVER_API_URL "http://server:8000"
 
 log "Настройка Remnawave"
 
-# Back-filled rather than overwritten: an .env from before the move off
-# 3x-ui has none of these keys, and re-running the installer must not clear
-# values an admin already set.
-for key in REMNAWAVE_BASE_URL REMNAWAVE_TOKEN REMNAWAVE_CADDY_TOKEN \
-           REMNAWAVE_PANEL_ADDRESS; do
-    if [[ -z "$(get_env "$key" || true)" ]] && ! grep -qE "^${key}=" "$ENV_FILE"; then
-        set_env "$key" ""
-    fi
-done
+# Declared up front: several branches below leave it untouched, and `set -u`
+# turns an unset variable into a crash at the summary rather than a warning.
+REMNAWAVE_MISSING=""
+RW_ENV_FILE="${APP_DIR}/.env.remnawave"
 
-if [[ -z "$(get_env REMNAWAVE_NODE_PORT || true)" ]]; then
-    set_env REMNAWAVE_NODE_PORT "2222"
+# The panel is brought up here by default. Set REMNAWAVE_EXTERNAL=1 (or point
+# REMNAWAVE_BASE_URL at something that is not our own container) to use a
+# panel you already run instead -- then this whole section is skipped and the
+# only thing you owe us is a token.
+RW_EXISTING_URL="$(get_env REMNAWAVE_BASE_URL || true)"
+RW_EXISTING_TOKEN="$(get_env REMNAWAVE_TOKEN || true)"
+
+if [[ "${REMNAWAVE_EXTERNAL:-0}" == "1" ]] \
+   || { [[ -n "$RW_EXISTING_URL" ]] && [[ "$RW_EXISTING_URL" != *"//remnawave:"* ]]; }; then
+
+    log "Используется внешняя панель Remnawave: ${RW_EXISTING_URL:-<не задана>}"
+    RW_MANAGED=0
+
+    if [[ -z "$RW_EXISTING_URL" || -z "$RW_EXISTING_TOKEN" ]]; then
+        REMNAWAVE_MISSING="REMNAWAVE_BASE_URL / REMNAWAVE_TOKEN (внешняя панель)"
+    fi
+
+else
+    RW_MANAGED=1
+    COMPOSE_PROFILE_ARGS="--profile remnawave"
+    set_env REMNAWAVE_BASE_URL "http://remnawave:3000"
 fi
 
+set_env REMNAWAVE_NODE_PORT "${REMNAWAVE_NODE_PORT:-2222}"
+
 # Guessed, not demanded: it is only a default the admin can correct, and a
-# wrong guess is visible in .env rather than silently baked into a firewall
-# rule. Left empty if we cannot work it out.
+# wrong guess is visible in .env rather than silently baked into a node's
+# firewall rule. Left empty if we cannot work it out.
 if [[ -z "$(get_env REMNAWAVE_PANEL_ADDRESS || true)" ]]; then
     DETECTED_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     if [[ -n "$DETECTED_IP" ]]; then
         set_env REMNAWAVE_PANEL_ADDRESS "$DETECTED_IP"
         echo "REMNAWAVE_PANEL_ADDRESS определён автоматически: $DETECTED_IP"
+    else
+        set_env REMNAWAVE_PANEL_ADDRESS ""
+        echo "⚠️  Не удалось определить публичный IP — впишите"
+        echo "    REMNAWAVE_PANEL_ADDRESS в .env вручную, иначе ноды не подключатся."
     fi
 fi
 
-REMNAWAVE_MISSING=""
-[[ -z "$(get_env REMNAWAVE_BASE_URL || true)" ]] && REMNAWAVE_MISSING="REMNAWAVE_BASE_URL"
-if [[ -z "$(get_env REMNAWAVE_TOKEN || true)" ]]; then
-    REMNAWAVE_MISSING="${REMNAWAVE_MISSING:+$REMNAWAVE_MISSING, }REMNAWAVE_TOKEN"
-fi
+# --- the panel's own env, separate from ours ------------------------------
+#
+# Written even when an external panel is used: docker-compose.yml references
+# this file, and `docker compose --profile remnawave` refuses to run at all
+# when an env_file is missing. An unused file costs nothing; a compose that
+# fails on every boot does.
+#
+# Written once and then left alone. APP_SECRET is what the panel signs its
+# JWTs with, so regenerating it on a re-run would invalidate every session
+# and every API token we have already issued.
+if [[ ! -f "$RW_ENV_FILE" ]]; then
 
+    log "Создание .env.remnawave"
+
+    RW_DB_PASSWORD="$(openssl rand -hex 24)"
+
+    cat > "$RW_ENV_FILE" <<EOF
+### Панель Remnawave. Отдельный файл, а не наш .env: у панели своя
+### переменная TELEGRAM_BOT_TOKEN, и отдать ей наш .env значило бы молча
+### передать ей токен нашего бота.
+APP_PORT=3000
+METRICS_PORT=3001
+API_INSTANCES=1
+
+POSTGRES_USER=remnawave
+POSTGRES_PASSWORD=${RW_DB_PASSWORD}
+POSTGRES_DB=remnawave
+DATABASE_URL=postgresql://remnawave:${RW_DB_PASSWORD}@remnawave-db:5432/remnawave
+
+REDIS_SOCKET=/var/run/valkey/valkey.sock
+
+APP_SECRET=$(openssl rand -hex 64)
+METRICS_USER=metrics
+METRICS_PASS=$(openssl rand -hex 32)
+WEBHOOK_SECRET_HEADER=$(openssl rand -hex 64)
+
+IS_TELEGRAM_NOTIFICATIONS_ENABLED=false
+WEBHOOK_ENABLED=false
+
+FRONT_END_DOMAIN=*
+SUB_PUBLIC_DOMAIN=${SUB_PUBLIC_DOMAIN:-127.0.0.1:3000/api/sub}
+EOF
+
+    chmod 600 "$RW_ENV_FILE"
+    echo ".env.remnawave создан"
+
+else
+    echo ".env.remnawave уже существует — секреты панели сохранены."
+fi
 
 # ============================================================
 # Telegram
@@ -483,8 +550,8 @@ echo "TELEGRAM_ADMIN_IDS:     ${TELEGRAM_ADMIN_IDS}"
 echo
 echo "Remnawave:"
 echo
-echo "REMNAWAVE_BASE_URL:     $(get_env REMNAWAVE_BASE_URL || true)"
-echo "REMNAWAVE_TOKEN:        $([[ -n "$(get_env REMNAWAVE_TOKEN || true)" ]] && echo configured || echo "НЕ ЗАДАН")"
+echo "REMNAWAVE_BASE_URL:      $(get_env REMNAWAVE_BASE_URL || true)"
+echo "REMNAWAVE_TOKEN:         $([[ -n "$(get_env REMNAWAVE_TOKEN || true)" ]] && echo configured || echo "НЕ ЗАДАН")"
 echo "REMNAWAVE_PANEL_ADDRESS: $(get_env REMNAWAVE_PANEL_ADDRESS || true)"
 echo
 
@@ -498,6 +565,7 @@ log "Проверка Docker Compose"
 docker compose \
     --env-file "$ENV_FILE" \
     -f "$COMPOSE_FILE" \
+    $COMPOSE_PROFILE_ARGS \
     config >/dev/null
 
 echo "docker-compose.yml корректен"
@@ -649,6 +717,90 @@ if [[ "$SERVER_STATUS" != "running" ]]; then
 
 fi
 
+
+# ============================================================
+# Start the Remnawave panel and mint its API token
+# ============================================================
+
+if [[ "$RW_MANAGED" == "1" ]]; then
+
+    log "Запуск панели Remnawave"
+
+    docker compose \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        $COMPOSE_PROFILE_ARGS \
+        up -d remnawave-db remnawave-redis remnawave
+
+    # Credentials are generated once and kept in .env, because they are the
+    # only way back into the panel: registration closes after the first
+    # account exists, so losing them means the admin UI is unreachable even
+    # though our API token keeps working.
+    RW_ADMIN_USER="$(get_env REMNAWAVE_ADMIN_USER || true)"
+    RW_ADMIN_PASS="$(get_env REMNAWAVE_ADMIN_PASSWORD || true)"
+
+    if [[ -z "$RW_ADMIN_USER" ]]; then
+        RW_ADMIN_USER="vpn3xadmin"
+        set_env REMNAWAVE_ADMIN_USER "$RW_ADMIN_USER"
+    fi
+
+    if [[ -z "$RW_ADMIN_PASS" ]]; then
+        # The panel requires >=24 chars with upper, lower and a digit.
+        RW_ADMIN_PASS="Vpn3x$(openssl rand -hex 16)A1"
+        set_env REMNAWAVE_ADMIN_PASSWORD "$RW_ADMIN_PASS"
+    fi
+
+    if [[ -n "$(get_env REMNAWAVE_TOKEN || true)" ]]; then
+
+        echo "REMNAWAVE_TOKEN уже задан — пропускаю выпуск нового."
+
+    else
+
+        log "Выпуск API-токена Remnawave"
+
+        # Run inside the server container: it is on the compose network, so
+        # http://remnawave:3000 resolves, and it already has httpx.
+        set +e
+        RW_TOKEN="$(
+            docker compose \
+                --env-file "$ENV_FILE" \
+                -f "$COMPOSE_FILE" \
+                run --rm --no-deps \
+                -v "${APP_DIR}/scripts:/scripts:ro" \
+                server \
+                python3 /scripts/provision_panel.py \
+                    "http://remnawave:3000" \
+                    "$RW_ADMIN_USER" \
+                    "$RW_ADMIN_PASS" \
+                    "vpn-3x"
+        )"
+        RW_TOKEN_STATUS=$?
+        set -e
+
+        # Belt and braces: `docker compose run` can prepend its own noise to
+        # stdout, and an empty value would be written to .env as if it had
+        # worked.
+        RW_TOKEN="$(printf '%s' "$RW_TOKEN" | tr -d '\r' | tail -n 1 | tr -d '[:space:]')"
+
+        if [[ $RW_TOKEN_STATUS -ne 0 || -z "$RW_TOKEN" ]]; then
+            echo
+            echo "⚠️  Не удалось выпустить токен автоматически."
+            echo "    Панель работает; создайте токен вручную и впишите в .env:"
+            echo "      ssh -L 3000:127.0.0.1:3000 root@<этот сервер>"
+            echo "      http://127.0.0.1:3000  ->  Settings -> API Tokens"
+            echo "      логин: $RW_ADMIN_USER"
+            echo "      пароль: $RW_ADMIN_PASS"
+            echo
+            REMNAWAVE_MISSING="REMNAWAVE_TOKEN"
+        else
+            set_env REMNAWAVE_TOKEN "$RW_TOKEN"
+            echo "API-токен Remnawave выпущен и записан в .env"
+            REMNAWAVE_MISSING=""
+        fi
+
+    fi
+
+fi
 
 # ============================================================
 # Database migrations
@@ -838,8 +990,8 @@ RemainAfterExit=yes
 
 WorkingDirectory=${APP_DIR}
 
-ExecStart=/usr/bin/docker compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} up -d
-ExecStop=/usr/bin/docker compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} down
+ExecStart=/usr/bin/docker compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} ${COMPOSE_PROFILE_ARGS} up -d
+ExecStop=/usr/bin/docker compose --env-file ${ENV_FILE} -f ${COMPOSE_FILE} ${COMPOSE_PROFILE_ARGS} down
 
 TimeoutStartSec=0
 TimeoutStopSec=120
@@ -858,14 +1010,32 @@ systemctl enable vpn-3x.service
 
 log "Финальная проверка"
 
+# The server, worker and bot were started before the token existed, so they
+# are holding a config without it. Recreate them now rather than leaving the
+# admin to discover it at the end of the add-node wizard.
+if [[ "$RW_MANAGED" == "1" && -n "$(get_env REMNAWAVE_TOKEN || true)" ]]; then
+    log "Перезапуск сервисов с токеном панели"
+    docker compose \
+        --env-file "$ENV_FILE" \
+        -f "$COMPOSE_FILE" \
+        $COMPOSE_PROFILE_ARGS \
+        up -d --force-recreate server worker bot
+    sleep 8
+fi
+
 docker compose \
     --env-file "$ENV_FILE" \
     -f "$COMPOSE_FILE" \
+    $COMPOSE_PROFILE_ARGS \
     ps
 
 echo
 echo "API:"
 curl -fsS http://127.0.0.1:8000/health
+echo
+echo "Зависимости:"
+curl -fsS -H "X-API-Key: $(get_env INTERNAL_API_KEY)" \
+    http://127.0.0.1:8000/health/ready || true
 
 echo
 echo
@@ -900,6 +1070,24 @@ echo
 echo "  systemctl status vpn-3x.service"
 echo "  systemctl restart vpn-3x.service"
 echo
+
+# Printed once, here, because registration closes after the first account:
+# these credentials are the only way into the panel's UI, and they are not
+# recoverable from it. They stay in .env (chmod 600) as well.
+if [[ "$RW_MANAGED" == "1" ]]; then
+    echo "Панель Remnawave:"
+    echo
+    echo "  Доступ только с этого сервера (наружу не опубликована)."
+    echo "  С вашей машины:  ssh -L 3000:127.0.0.1:3000 ${SUDO_USER:-root}@$(get_env REMNAWAVE_PANEL_ADDRESS || echo '<ip>')"
+    echo "  Затем откройте:  http://127.0.0.1:3000"
+    echo
+    echo "  Логин:  $(get_env REMNAWAVE_ADMIN_USER || true)"
+    echo "  Пароль: $(get_env REMNAWAVE_ADMIN_PASSWORD || true)"
+    echo
+    echo "  Эти данные больше нигде не восстановить: регистрация в панели"
+    echo "  закрывается после создания первого администратора."
+    echo
+fi
 
 # Said last, and loudly: without these, adding a node fails at the very end
 # of the wizard, after the admin has already typed everything in.
