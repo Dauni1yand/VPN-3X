@@ -49,5 +49,56 @@ services:
     depends_on:
       - server
 
+  # --- Remnawave panel ------------------------------------------------------
+  # Optional: `docker compose --profile remnawave up -d` runs the panel here,
+  # alongside the main server. Leave the profile off and point
+  # REMNAWAVE_BASE_URL at a panel you already run instead -- nothing else in
+  # the stack cares which of the two it is.
+  #
+  # The panel keeps its own database. Sharing ours would mean its migrations
+  # and ours writing to one schema, and its upgrades are not ours to
+  # coordinate.
+  remnawave-db:
+    image: postgres:17
+    profiles: ["remnawave"]
+    environment:
+      POSTGRES_USER: ${REMNAWAVE_DB_USER:-remnawave}
+      POSTGRES_PASSWORD: ${REMNAWAVE_DB_PASSWORD:-remnawave}
+      POSTGRES_DB: ${REMNAWAVE_DB_NAME:-remnawave}
+    volumes:
+      - remnawave-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${REMNAWAVE_DB_USER:-remnawave}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  remnawave-redis:
+    image: valkey/valkey:8-alpine
+    profiles: ["remnawave"]
+    volumes:
+      - remnawave-redis-data:/data
+
+  remnawave:
+    image: remnawave/backend:latest
+    profiles: ["remnawave"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${REMNAWAVE_DB_USER:-remnawave}:${REMNAWAVE_DB_PASSWORD:-remnawave}@remnawave-db:5432/${REMNAWAVE_DB_NAME:-remnawave}
+      REDIS_HOST: remnawave-redis
+      REDIS_PORT: 6379
+    # Published on loopback only: the panel's admin UI and API must not be
+    # reachable from the internet on a bare port. Put it behind the same
+    # reverse proxy as the main server if you want to reach it remotely.
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      remnawave-db:
+        condition: service_healthy
+      remnawave-redis:
+        condition: service_started
+
 volumes:
   db-data:
+  remnawave-db-data:
+  remnawave-redis-data:
