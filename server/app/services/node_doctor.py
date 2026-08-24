@@ -10,6 +10,13 @@ identically from the client side, and identically to a working config.
 So the question worth answering is never "is the node up" but "does the
 node serve exactly the config we handed out". This reads the inbound back
 from the panel and diffs it field by field against our own row.
+
+The inbound is only half of it. A node that accepts the connection and then
+cannot forward it -- a broken egress, a routing rule that blackholes
+everything, an outbound pinned to an address family the VPS does not
+actually have -- presents to the client identically again: connected, a
+latency reading, no internet. So the second half asks the node to send real
+traffic through its own outbound and reports what happened.
 """
 
 from __future__ import annotations
@@ -219,6 +226,86 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
             f"{'...' if len(stale) > 3 else ''}). Эти конфиги подключатся и не "
             "будут передавать трафик."
         )
+
+    # --- can the node forward traffic at all ------------------------------
+    #
+    # Everything above this point is about the inbound: whether the node
+    # accepts what we handed out. None of it says whether the accepted
+    # connection goes anywhere. These two checks are the egress half.
+    try:
+        xray_config = await client.get_xray_config()
+    except Exception as exc:  # noqa: BLE001 -- report, don't abort the report
+        report["egress"] = {"error": f"{type(exc).__name__}: {exc}"}
+        xray_config = None
+
+    if xray_config is not None:
+        outbounds = xray_config.get("outbounds") or []
+        rules = (xray_config.get("routing") or {}).get("rules") or []
+
+        report["egress"] = {
+            "outbounds": [
+                {
+                    "tag": entry.get("tag"),
+                    "protocol": entry.get("protocol"),
+                    "domainStrategy": (entry.get("settings") or {}).get("domainStrategy"),
+                }
+                for entry in outbounds
+                if isinstance(entry, dict)
+            ],
+            "routing_rules": len(rules),
+        }
+
+        primary = next(
+            (
+                entry
+                for entry in outbounds
+                if isinstance(entry, dict) and entry.get("protocol") == "freedom"
+            ),
+            None,
+        )
+
+        if primary is None:
+            problems.append(
+                "У ноды нет ни одного freedom-исходящего: трафик клиента "
+                "некуда отправлять. Подключение установится, интернета не будет."
+            )
+        else:
+            # A rule that sends our inbound's traffic to a blackhole would
+            # produce exactly the symptom under investigation, so name it
+            # rather than leaving it in the rule count.
+            blackholes = {
+                entry.get("tag")
+                for entry in outbounds
+                if isinstance(entry, dict) and entry.get("protocol") == "blackhole"
+            }
+            catch_all = [
+                rule
+                for rule in rules
+                if isinstance(rule, dict)
+                and rule.get("outboundTag") in blackholes
+                and not any(
+                    rule.get(key)
+                    for key in ("domain", "ip", "inboundTag", "port", "protocol", "source")
+                )
+            ]
+            if catch_all:
+                problems.append(
+                    "В маршрутизации есть правило без условий, отправляющее "
+                    "весь трафик в blackhole. Клиент подключится, трафик "
+                    "будет отброшен на ноде."
+                )
+
+            try:
+                probe = await client.test_outbound(primary)
+                report["egress"]["probe"] = probe
+                if not probe.get("success"):
+                    problems.append(
+                        "Нода не может выйти в интернет через свой freedom-исходящий "
+                        f"({probe.get('error') or 'без деталей'}). Это и есть причина "
+                        "«подключается, но интернета нет» — дело не в ключах."
+                    )
+            except Exception as exc:  # noqa: BLE001 -- informational
+                report["egress"]["probe"] = f"недоступно: {type(exc).__name__}: {exc}"
 
     # --- has anyone actually connected ------------------------------------
     try:

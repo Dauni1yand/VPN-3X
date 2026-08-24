@@ -16,6 +16,8 @@ no token, so the CSRF token must be fetched *before* posting to /login.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.core.security import decrypt_secret
@@ -353,6 +355,51 @@ class ThreeXUIClient:
         )
 
         return self._body(response)
+
+    async def get_xray_config(self) -> dict:
+        """The full xray-core config the node is actually running.
+
+        The inbound is only half of what makes a config carry traffic. This
+        is the other half: outbounds, routing rules and DNS. A node that
+        accepts the connection and then cannot forward it presents to the
+        client exactly like a refused REALITY handshake -- connected, a
+        latency reading, no internet.
+        """
+
+        response = await self._request(
+            "GET",
+            "/panel/api/server/getConfigJson",
+        )
+
+        obj = self._body(response).get("obj")
+
+        if isinstance(obj, str):
+            try:
+                obj = json.loads(obj)
+            except ValueError as exc:
+                raise ThreeXUIAPIError("3x-ui returned an unparseable xray config") from exc
+
+        return obj if isinstance(obj, dict) else {}
+
+    async def test_outbound(self, outbound: dict, mode: str = "http") -> dict:
+        """Asks the node to actually send traffic through `outbound`.
+
+        The panel spins up a throwaway xray instance and makes a real request
+        through it, so this answers "can this node reach the internet the way
+        it would for a client" rather than "is the config shaped right".
+
+        Form-encoded, not JSON: the handler reads c.PostForm("outbound").
+        """
+
+        response = await self._request(
+            "POST",
+            "/panel/api/xray/testOutbound",
+            data={"outbound": json.dumps(outbound), "mode": mode},
+        )
+
+        obj = self._body(response).get("obj")
+
+        return obj if isinstance(obj, dict) else {}
 
     async def list_xray_versions(self) -> list[str]:
         """Xray-core releases the panel is willing to install, newest first.
