@@ -255,6 +255,18 @@ TELEGRAM_ADMIN_IDS=
 # Internal API
 SERVER_API_URL=http://server:8000
 
+# Remnawave -- the panel that owns every node. One panel for the whole
+# deployment; nodes have no panel of their own.
+# The token is minted in the panel under Settings -> API Tokens.
+REMNAWAVE_BASE_URL=
+REMNAWAVE_TOKEN=
+REMNAWAVE_CADDY_TOKEN=
+# The address nodes reach the panel on -- normally this server's public IP.
+# Node bootstrap writes the node's firewall rule for NODE_PORT against this,
+# so an empty value leaves that port closed and the node cannot connect.
+REMNAWAVE_PANEL_ADDRESS=
+REMNAWAVE_NODE_PORT=2222
+
 # Telegram support
 TELEGRAM_SUPPORT_CHAT_ID=
 
@@ -329,6 +341,44 @@ if [[ -z "$(get_env INTERNAL_API_KEY || true)" ]]; then
 fi
 
 set_env SERVER_API_URL "http://server:8000"
+
+
+# ============================================================
+# Remnawave
+# ============================================================
+
+log "Настройка Remnawave"
+
+# Back-filled rather than overwritten: an .env from before the move off
+# 3x-ui has none of these keys, and re-running the installer must not clear
+# values an admin already set.
+for key in REMNAWAVE_BASE_URL REMNAWAVE_TOKEN REMNAWAVE_CADDY_TOKEN \
+           REMNAWAVE_PANEL_ADDRESS; do
+    if [[ -z "$(get_env "$key" || true)" ]] && ! grep -qE "^${key}=" "$ENV_FILE"; then
+        set_env "$key" ""
+    fi
+done
+
+if [[ -z "$(get_env REMNAWAVE_NODE_PORT || true)" ]]; then
+    set_env REMNAWAVE_NODE_PORT "2222"
+fi
+
+# Guessed, not demanded: it is only a default the admin can correct, and a
+# wrong guess is visible in .env rather than silently baked into a firewall
+# rule. Left empty if we cannot work it out.
+if [[ -z "$(get_env REMNAWAVE_PANEL_ADDRESS || true)" ]]; then
+    DETECTED_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [[ -n "$DETECTED_IP" ]]; then
+        set_env REMNAWAVE_PANEL_ADDRESS "$DETECTED_IP"
+        echo "REMNAWAVE_PANEL_ADDRESS определён автоматически: $DETECTED_IP"
+    fi
+fi
+
+REMNAWAVE_MISSING=""
+[[ -z "$(get_env REMNAWAVE_BASE_URL || true)" ]] && REMNAWAVE_MISSING="REMNAWAVE_BASE_URL"
+if [[ -z "$(get_env REMNAWAVE_TOKEN || true)" ]]; then
+    REMNAWAVE_MISSING="${REMNAWAVE_MISSING:+$REMNAWAVE_MISSING, }REMNAWAVE_TOKEN"
+fi
 
 
 # ============================================================
@@ -430,6 +480,12 @@ echo "BOT_TOKEN:              configured"
 echo "BOT_ADMIN_IDS:          ${BOT_ADMIN_IDS}"
 echo "TELEGRAM_BOT_TOKEN:     configured"
 echo "TELEGRAM_ADMIN_IDS:     ${TELEGRAM_ADMIN_IDS}"
+echo
+echo "Remnawave:"
+echo
+echo "REMNAWAVE_BASE_URL:     $(get_env REMNAWAVE_BASE_URL || true)"
+echo "REMNAWAVE_TOKEN:        $([[ -n "$(get_env REMNAWAVE_TOKEN || true)" ]] && echo configured || echo "НЕ ЗАДАН")"
+echo "REMNAWAVE_PANEL_ADDRESS: $(get_env REMNAWAVE_PANEL_ADDRESS || true)"
 echo
 
 
@@ -844,4 +900,26 @@ echo
 echo "  systemctl status vpn-3x.service"
 echo "  systemctl restart vpn-3x.service"
 echo
+
+# Said last, and loudly: without these, adding a node fails at the very end
+# of the wizard, after the admin has already typed everything in.
+if [[ -n "$REMNAWAVE_MISSING" ]]; then
+    echo "============================================================"
+    echo
+    echo "  ⚠️  НЕ ЗАДАНО: $REMNAWAVE_MISSING"
+    echo
+    echo "  Без этого установка нод работать не будет: главный сервер"
+    echo "  управляет нодами только через панель Remnawave."
+    echo
+    echo "  1) Поднимите панель (здесь же, рядом с сервером):"
+    echo "       cd $APP_DIR && docker compose --profile remnawave up -d"
+    echo "     либо укажите адрес панели, которая у вас уже есть."
+    echo "  2) В панели: Settings -> API Tokens -> создайте токен."
+    echo "  3) Впишите в $ENV_FILE:"
+    echo "       REMNAWAVE_BASE_URL=http://remnawave:3000"
+    echo "       REMNAWAVE_TOKEN=<токен из панели>"
+    echo "  4) docker compose up -d"
+    echo
+fi
+
 echo "============================================================"

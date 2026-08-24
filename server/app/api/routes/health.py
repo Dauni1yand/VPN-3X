@@ -3,6 +3,7 @@ from sqlalchemy import text
 
 from app.db.session import async_session_maker
 from app.services.queue import get_queue
+from app.services.remnawave_client import get_remnawave
 
 router = APIRouter(tags=["health"])
 
@@ -34,6 +35,17 @@ async def readiness() -> dict:
         components["queue"] = "ok"
     except Exception as exc:  # noqa: BLE001 -- report, don't raise
         components["queue"] = f"error: {type(exc).__name__}: {exc}"
+
+    # The panel is a hard dependency for anything to do with nodes: without
+    # it the server cannot install one, provision one, or issue a config.
+    # It belongs here for the same reason the queue does -- an unreachable
+    # dependency should be visible before it turns into a failure at the end
+    # of a wizard.
+    try:
+        await get_remnawave().health()
+        components["remnawave"] = "ok"
+    except Exception as exc:  # noqa: BLE001 -- report, don't raise
+        components["remnawave"] = f"error: {exc}"
 
     return {
         "status": "ok" if all(v == "ok" for v in components.values()) else "degraded",

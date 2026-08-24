@@ -126,6 +126,25 @@ async def bootstrap_node_route(payload: NodeBootstrapRequest, db: AsyncSession =
     credentials for -- the one panel this deployment talks to is configured
     once in .env."""
 
+    # Checked before anything is created. This used to surface from inside
+    # the worker, which meant the admin typed the whole wizard, waited, and
+    # then got a failure notification with a node left behind in `unstable`
+    # that they had to delete by hand. Nothing about a missing panel URL
+    # needs a node row to discover.
+    try:
+        get_remnawave()
+    except RemnawaveError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"{exc}\n\nГлавный сервер управляет нодами только через панель "
+                "Remnawave, без неё установка ноды невозможна. Поднимите панель "
+                "(docker compose --profile remnawave up -d), создайте токен в "
+                "Settings → API Tokens и впишите REMNAWAVE_BASE_URL и "
+                "REMNAWAVE_TOKEN в .env."
+            ),
+        ) from exc
+
     node = Node(
         name=payload.name,
         ip=payload.ip,
