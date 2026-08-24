@@ -22,14 +22,14 @@ from dataclasses import dataclass
 import asyncssh
 
 from app.core.config import settings
-from app.services.node_bootstrap import (
+from app.services.ssh_ops import (
     APT_OPTS,
     CONNECT_TIMEOUT_SECONDS,
     LOGIN_TIMEOUT_SECONDS,
     NONINTERACTIVE,
     NodeBootstrapError,
-    _pick_node_sni,
-    _run,
+    pick_node_sni,
+    run_remote,
 )
 
 NODE_DIR = "/opt/remnanode"
@@ -116,7 +116,7 @@ async def bootstrap_remnawave_node(
                 conn, node_port=node_port, panel_address=panel_address, ssh_port=ssh_port
             )
 
-            sni = await _pick_node_sni(conn)
+            sni = await pick_node_sni(conn)
 
     except NodeBootstrapError:
         raise
@@ -138,13 +138,13 @@ async def _install_docker(conn: asyncssh.SSHClientConnection) -> None:
     if probe.exit_status == 0:
         return
 
-    await _run(
+    await run_remote(
         conn,
         f"{NONINTERACTIVE} apt-get update -qq && "
         f"{NONINTERACTIVE} apt-get install -y -qq {APT_OPTS} ca-certificates curl ufw",
     )
-    await _run(conn, "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh")
-    await _run(conn, f"{NONINTERACTIVE} sh /tmp/get-docker.sh")
+    await run_remote(conn, "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh")
+    await run_remote(conn, f"{NONINTERACTIVE} sh /tmp/get-docker.sh")
 
     verify = await conn.run("docker compose version", check=False)
     if verify.exit_status != 0:
@@ -163,7 +163,7 @@ async def _write_node_compose(
     process list and in the shell history of anyone auditing the box.
     """
 
-    await _run(conn, f"mkdir -p {NODE_DIR} && chmod 700 {NODE_DIR}")
+    await run_remote(conn, f"mkdir -p {NODE_DIR} && chmod 700 {NODE_DIR}")
 
     compose = build_node_compose(node_port=node_port, secret_key=secret_key)
 
@@ -181,7 +181,7 @@ async def _write_node_compose(
 
 async def _start_node(conn: asyncssh.SSHClientConnection) -> None:
     # `up -d` pulls the image, which on a cold box is most of the wait.
-    await _run(conn, f"cd {NODE_DIR} && docker compose up -d", timeout=NODE_START_TIMEOUT_SECONDS)
+    await run_remote(conn, f"cd {NODE_DIR} && docker compose up -d", timeout=NODE_START_TIMEOUT_SECONDS)
 
 
 async def _wait_for_node_port(conn: asyncssh.SSHClientConnection, node_port: int) -> None:
@@ -241,14 +241,14 @@ async def _configure_firewall(
     # Both 22 and the configured port, since a box moved off 22 still often
     # has tooling pointed at it.
     for port in {22, int(ssh_port)}:
-        await _run(conn, f"ufw allow {port}/tcp || true")
+        await run_remote(conn, f"ufw allow {port}/tcp || true")
 
-    await _run(conn, "ufw allow 443/tcp || true")
+    await run_remote(conn, "ufw allow 443/tcp || true")
 
     if panel_address:
-        await _run(
+        await run_remote(
             conn,
             f"ufw allow from {panel_address} to any port {node_port} proto tcp || true",
         )
 
-    await _run(conn, "ufw --force enable || true")
+    await run_remote(conn, "ufw --force enable || true")

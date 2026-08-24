@@ -1,27 +1,28 @@
 """Compares what a node actually serves against what we recorded for it.
 
-REALITY makes this necessary. A server that refuses a handshake -- wrong
-shortId, an SNI outside serverNames, a client core below minClientVer --
-does not answer with an error. It proxies the connection on to `dest`, so
-the client completes a TLS handshake, reports the server reachable, shows a
-latency, and carries no traffic. Every failure in that family presents
-identically from the client side, and identically to a working config.
+REALITY makes this necessary, and the reasoning did not change when the
+panel did. A server that refuses a handshake -- wrong shortId, an SNI
+outside serverNames, a client core below minClientVer -- does not answer
+with an error. It proxies the connection on to `dest`, so the client
+completes a TLS handshake, reports the server reachable, shows a latency,
+and carries no traffic. Every failure in that family presents identically
+from the client side, and identically to a working config.
 
 So the question worth answering is never "is the node up" but "does the
-node serve exactly the config we handed out". This reads the inbound back
-from the panel and diffs it field by field against our own row.
+node serve exactly the config we handed out". Under Remnawave that splits
+three ways, and all three have to hold:
 
-The inbound is only half of it. A node that accepts the connection and then
-cannot forward it -- a broken egress, a routing rule that blackholes
-everything, an outbound pinned to an address family the VPS does not
-actually have -- presents to the client identically again: connected, a
-latency reading, no internet. So the second half asks the node to send real
-traffic through its own outbound and reports what happened.
+  1. the panel can reach the node at all (it dials the node, not the
+     reverse, so this is the panel's view and not a guess),
+  2. the config profile the node is bound to still carries the inbound our
+     configs were issued against, with the same REALITY parameters, and
+  3. each user is still in the squad that scopes them to this node.
+
+A node can pass any two of those and serve nothing.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from sqlalchemy import select
@@ -29,101 +30,117 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, ClientStatus, Inbound, Node
 from app.services.reality_inbound import MIN_CLIENT_VERSION
-from app.services.threexui_client import get_pooled_client
+from app.services.remnawave_client import get_remnawave
+from app.services.remnawave_provisioner import inbound_tag
 
 
-def _as_dict(value: Any) -> dict:
-    """Inbound.MarshalJSON expands settings/streamSettings into objects, but
-    documents a fallback to a JSON string when the stored text isn't valid
-    JSON. Both shapes reach us."""
+def _reality_of(profile: dict, tag: str) -> tuple[dict, dict] | tuple[None, None]:
+    """The inbound with `tag` and its realitySettings, out of a profile."""
 
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return {}
-    return value if isinstance(value, dict) else {}
+    config = profile.get("config")
+    if not isinstance(config, dict):
+        return None, None
 
+    for entry in config.get("inbounds") or []:
+        if isinstance(entry, dict) and entry.get("tag") == tag:
+            stream = entry.get("streamSettings") or {}
+            return entry, (stream.get("realitySettings") or {})
 
-def _same_link(left: str, right: str) -> bool:
-    """Whether two share links describe the same connection.
-
-    Compares everything but the `#fragment`: that is the display name, which
-    we override on issuance and the panel regenerates from a template
-    carrying live traffic and expiry figures, so it differs on every call
-    without anything having drifted. Everything before it is stable: the
-    panel sorts query parameters, and it picks sni/sid at random only when
-    serverNames/shortIds hold more than one entry, which ours never do.
-    """
-
-    return left.split("#", 1)[0] == right.split("#", 1)[0]
+    return None, None
 
 
 async def diagnose_node(db: AsyncSession, node: Node) -> dict:
     report: dict[str, Any] = {"node_id": node.id, "name": node.name, "ip": node.ip}
     problems: list[str] = []
 
-    client = get_pooled_client(node)
+    panel = get_remnawave()
 
-    # --- panel reachable at all ------------------------------------------
+    # --- 1. does the panel have this node, and can it reach it -----------
+    if not node.remnawave_node_uuid:
+        report["panel"] = "не зарегистрирована"
+        report["problems"] = [
+            "Ноды нет в панели Remnawave — она ничего не обслуживает. "
+            "Переустановите её."
+        ]
+        return report
+
     try:
-        remote_inbounds = await client.list_inbounds()
+        state = await panel.get_node(node.remnawave_node_uuid)
         report["panel"] = "ok"
     except Exception as exc:  # noqa: BLE001 -- this IS the finding
         report["panel"] = f"{type(exc).__name__}: {exc}"
-        report["problems"] = ["Панель 3x-ui недоступна с главного сервера."]
+        report["problems"] = ["Панель Remnawave недоступна с главного сервера."]
         return report
+
+    report["node"] = {
+        "isConnected": state.get("isConnected"),
+        "isDisabled": state.get("isDisabled"),
+        "lastStatusMessage": state.get("lastStatusMessage"),
+        "xrayVersion": state.get("xrayVersion"),
+        "nodeVersion": state.get("nodeVersion"),
+        "xrayUptime": state.get("xrayUptime"),
+        "usersOnline": state.get("usersOnline"),
+    }
+
+    if state.get("isDisabled"):
+        problems.append("Нода отключена в панели.")
+
+    if not state.get("isConnected"):
+        problems.append(
+            "Панель не может достучаться до ноды"
+            + (f": {state['lastStatusMessage']}" if state.get("lastStatusMessage") else "")
+            + ". Проверьте, что контейнер remnanode запущен и что его NODE_PORT "
+            "открыт для адреса панели."
+        )
 
     ours = (
         await db.execute(select(Inbound).where(Inbound.node_id == node.id).limit(1))
     ).scalar_one_or_none()
 
     if ours is None:
-        report["problems"] = ["В базе нет инбаунда для этой ноды."]
+        report["problems"] = problems + ["В базе нет инбаунда для этой ноды."]
         return report
 
-    remote = next(
-        (
-            candidate
-            for candidate in remote_inbounds
-            if isinstance(candidate, dict)
-            and candidate.get("id") == ours.remote_inbound_id
-        ),
-        None,
-    )
+    # --- 2. does the profile still carry our inbound, unchanged ----------
+    active = (state.get("configProfile") or {}).get("activeConfigProfileUuid")
+    if active and node.config_profile_uuid and str(active) != node.config_profile_uuid:
+        problems.append(
+            f"Нода привязана к другому config profile ({active}), а конфиги "
+            f"выданы под {node.config_profile_uuid}."
+        )
 
-    if remote is None:
-        report["problems"] = [
-            f"Инбаунд #{ours.remote_inbound_id} есть в нашей базе, "
-            f"но его нет на ноде. Конфиги, выданные для него, мертвы."
-        ]
+    try:
+        profile = await panel.get_config_profile(node.config_profile_uuid or str(active))
+    except Exception as exc:  # noqa: BLE001 -- report, don't abort
+        report["profile"] = f"недоступен: {type(exc).__name__}: {exc}"
+        report["problems"] = problems
         return report
 
-    # --- the fields a client actually negotiates on -----------------------
-    stream = _as_dict(remote.get("streamSettings"))
-    reality = _as_dict(stream.get("realitySettings"))
+    tag = inbound_tag(node)
+    entry, reality = _reality_of(profile, tag)
+
+    if entry is None:
+        problems.append(
+            f"В config profile ноды нет инбаунда {tag}. Конфиги, выданные "
+            "для него, мертвы."
+        )
+        report["problems"] = problems
+        return report
 
     report["inbound"] = {
-        "port": remote.get("port"),
-        "enabled": remote.get("enable"),
-        "security": stream.get("security"),
-        "network": stream.get("network"),
+        "port": entry.get("port"),
+        "security": (entry.get("streamSettings") or {}).get("security"),
         "serverNames": reality.get("serverNames"),
         "shortIds": reality.get("shortIds"),
         "minClientVer": reality.get("minClientVer"),
         "dest": reality.get("dest"),
+        "hasPublicKey": bool(reality.get("publicKey")),
     }
 
-    if not remote.get("enable", True):
-        problems.append("Инбаунд выключен в панели.")
-
-    if remote.get("port") != ours.port:
+    if entry.get("port") != ours.port:
         problems.append(
-            f"Порт на ноде {remote.get('port')}, а в конфигах выдан {ours.port}."
+            f"Порт в профиле {entry.get('port')}, а в конфигах выдан {ours.port}."
         )
-
-    if stream.get("security") != "reality":
-        problems.append(f"security на ноде = {stream.get('security')!r}, а не reality.")
 
     server_names = reality.get("serverNames") or []
     if ours.sni and ours.sni not in server_names:
@@ -139,20 +156,6 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
             "Рукопожатие будет отвергнуто, и клиент уйдёт на dest."
         )
 
-    # 3x-ui's own link generator reads pbk from realitySettings.settings.
-    # publicKey. Inbounds we created before that field was filled in still
-    # have it blank, which makes every link the panel produces for them --
-    # its QR code included -- unusable, even though xray itself is fine.
-    reality_settings = _as_dict(reality.get("settings"))
-    report["inbound"]["publicKeyForLinks"] = bool(reality_settings.get("publicKey"))
-    if not reality_settings.get("publicKey"):
-        problems.append(
-            "В realitySettings.settings.publicKey на ноде пусто: панель 3x-ui "
-            "выдаёт ссылки с пустым pbk=. Наши конфиги собираются локально и "
-            "работают, но ссылка/QR из самой панели — нет. Лечится "
-            "переустановкой инбаунда."
-        )
-
     min_ver = reality.get("minClientVer")
     if not min_ver:
         problems.append(
@@ -162,14 +165,19 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
     elif min_ver != MIN_CLIENT_VERSION:
         problems.append(f"minClientVer на ноде = {min_ver}, ожидался {MIN_CLIENT_VERSION}.")
 
-    # --- are our clients present on the node -----------------------------
-    settings = _as_dict(remote.get("settings"))
-    remote_uuids = {
-        str(entry.get("id"))
-        for entry in (settings.get("clients") or [])
-        if isinstance(entry, dict)
-    }
+    # A node that accepts the connection and cannot forward it looks to the
+    # client exactly like a refused handshake, so the egress side is worth
+    # naming even though the panel owns the config.
+    outbounds = (profile.get("config") or {}).get("outbounds") or []
+    if not any(
+        isinstance(item, dict) and item.get("protocol") == "freedom" for item in outbounds
+    ):
+        problems.append(
+            "В профиле нет freedom-исходящего: трафик клиента некуда "
+            "отправлять. Подключение установится, интернета не будет."
+        )
 
+    # --- 3. are our clients still scoped to this node --------------------
     our_clients = list(
         (
             await db.execute(
@@ -181,143 +189,41 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
         ).scalars()
     )
 
-    missing = [c for c in our_clients if c.remote_client_uuid not in remote_uuids]
-
-    report["clients"] = {
-        "ours_active": len(our_clients),
-        "on_node": len(remote_uuids),
-        "missing_on_node": len(missing),
-    }
-
-    if missing:
-        problems.append(
-            f"{len(missing)} из {len(our_clients)} выданных клиентов нет на ноде — "
-            "их конфиги подключатся и не будут передавать трафик."
-        )
-
-    # --- does the node still generate the links we handed out -------------
-    #
-    # The strongest check available, and the reason issuance asks the node
-    # for the link in the first place: the panel generates it from the same
-    # inbound row xray is configured from, so regenerating it now and
-    # comparing against the string the user actually holds catches every
-    # drift class at once -- rotated keys, a changed SNI or shortId, a
-    # re-created inbound -- without having to enumerate them.
-    stale: list[str] = []
+    detached: list[str] = []
     unavailable = 0
 
-    for ours_client in our_clients:
-        if not ours_client.vless_uri:
+    for client in our_clients:
+        if not client.remnawave_user_uuid:
+            # Issued under 3x-ui; there is no panel user to check.
+            unavailable += 1
             continue
         try:
-            live = await client.get_client_links(ours_client.email)
+            user = await panel.get_user(client.remnawave_user_uuid)
         except Exception:  # noqa: BLE001 -- absence of an answer is not drift
             unavailable += 1
             continue
-        if not any(_same_link(link, ours_client.vless_uri) for link in live):
-            stale.append(ours_client.email)
 
-    report["links"] = {"checked": len(our_clients), "stale": len(stale), "unavailable": unavailable}
-
-    if stale:
-        problems.append(
-            f"У {len(stale)} клиентов выданная ссылка больше не совпадает с той, "
-            f"которую нода генерирует сейчас ({', '.join(stale[:3])}"
-            f"{'...' if len(stale) > 3 else ''}). Эти конфиги подключатся и не "
-            "будут передавать трафик."
-        )
-
-    # --- can the node forward traffic at all ------------------------------
-    #
-    # Everything above this point is about the inbound: whether the node
-    # accepts what we handed out. None of it says whether the accepted
-    # connection goes anywhere. These two checks are the egress half.
-    try:
-        xray_config = await client.get_xray_config()
-    except Exception as exc:  # noqa: BLE001 -- report, don't abort the report
-        report["egress"] = {"error": f"{type(exc).__name__}: {exc}"}
-        xray_config = None
-
-    if xray_config is not None:
-        outbounds = xray_config.get("outbounds") or []
-        rules = (xray_config.get("routing") or {}).get("rules") or []
-
-        report["egress"] = {
-            "outbounds": [
-                {
-                    "tag": entry.get("tag"),
-                    "protocol": entry.get("protocol"),
-                    "domainStrategy": (entry.get("settings") or {}).get("domainStrategy"),
-                }
-                for entry in outbounds
-                if isinstance(entry, dict)
-            ],
-            "routing_rules": len(rules),
+        squads = {
+            str(item.get("uuid"))
+            for item in (user.get("activeInternalSquads") or [])
+            if isinstance(item, dict)
         }
+        if node.internal_squad_uuid and node.internal_squad_uuid not in squads:
+            detached.append(client.email)
 
-        primary = next(
-            (
-                entry
-                for entry in outbounds
-                if isinstance(entry, dict) and entry.get("protocol") == "freedom"
-            ),
-            None,
+    report["clients"] = {
+        "ours_active": len(our_clients),
+        "detached": len(detached),
+        "unchecked": unavailable,
+    }
+
+    if detached:
+        problems.append(
+            f"{len(detached)} из {len(our_clients)} клиентов больше не состоят в "
+            f"squad этой ноды ({', '.join(detached[:3])}"
+            f"{'...' if len(detached) > 3 else ''}) — их конфиги подключатся и "
+            "не будут передавать трафик."
         )
-
-        if primary is None:
-            problems.append(
-                "У ноды нет ни одного freedom-исходящего: трафик клиента "
-                "некуда отправлять. Подключение установится, интернета не будет."
-            )
-        else:
-            # A rule that sends our inbound's traffic to a blackhole would
-            # produce exactly the symptom under investigation, so name it
-            # rather than leaving it in the rule count.
-            blackholes = {
-                entry.get("tag")
-                for entry in outbounds
-                if isinstance(entry, dict) and entry.get("protocol") == "blackhole"
-            }
-            catch_all = [
-                rule
-                for rule in rules
-                if isinstance(rule, dict)
-                and rule.get("outboundTag") in blackholes
-                and not any(
-                    rule.get(key)
-                    for key in ("domain", "ip", "inboundTag", "port", "protocol", "source")
-                )
-            ]
-            if catch_all:
-                problems.append(
-                    "В маршрутизации есть правило без условий, отправляющее "
-                    "весь трафик в blackhole. Клиент подключится, трафик "
-                    "будет отброшен на ноде."
-                )
-
-            try:
-                probe = await client.test_outbound(primary)
-                report["egress"]["probe"] = probe
-                if not probe.get("success"):
-                    problems.append(
-                        "Нода не может выйти в интернет через свой freedom-исходящий "
-                        f"({probe.get('error') or 'без деталей'}). Это и есть причина "
-                        "«подключается, но интернета нет» — дело не в ключах."
-                    )
-            except Exception as exc:  # noqa: BLE001 -- informational
-                report["egress"]["probe"] = f"недоступно: {type(exc).__name__}: {exc}"
-
-    # --- has anyone actually connected ------------------------------------
-    try:
-        onlines = await client.get_online_clients()
-        report["online_now"] = onlines
-    except Exception as exc:  # noqa: BLE001 -- informational
-        report["online_now"] = f"недоступно: {type(exc).__name__}: {exc}"
-
-    try:
-        report["xray_log"] = (await client.get_xray_logs(30))[-12:]
-    except Exception as exc:  # noqa: BLE001 -- informational
-        report["xray_log"] = [f"недоступно: {type(exc).__name__}: {exc}"]
 
     report["problems"] = problems
     return report
