@@ -1,19 +1,15 @@
-"""Builds the JSON payload 3x-ui expects to create/update a VLESS+REALITY+
-XTLS inbound on tcp/443 (README: nodes only run vless+reality+xtls on tcp/443
-or grpc on a free port -- this targets the tcp/443 case).
+"""The REALITY constants every inbound this project builds has to carry.
 
-IMPORTANT: 3x-ui's inbound API takes `settings`, `streamSettings` and
-`sniffing` as JSON-encoded STRINGS (its DB column is TEXT), not nested
-objects -- that's a real quirk of the x-ui/3x-ui API, not a guess. The exact
-field names inside realitySettings are the standard xray-core REALITY config
-shape. Still: this has not been exercised against a live 3x-ui v3.6.0 panel
-(see PLAN.md Etap 0 R&D) -- treat it as needing that verification pass
-before relying on it in production.
+The payload builder that used to live here went with 3x-ui: that panel took
+`settings`/`streamSettings` as JSON-encoded strings, a quirk of its Go
+models, so the shape was specific to it. Remnawave takes an ordinary Xray
+config, and remnawave_provisioner builds it.
+
+What survives is the part that was never about the panel.
 """
 
 from __future__ import annotations
 
-import json
 
 REALITY_PORT = 443
 
@@ -36,65 +32,3 @@ REALITY_PORT = 443
 # high default is defending against. Being connectable wins here -- a VPN
 # nobody's client can reach is not a hardened VPN.
 MIN_CLIENT_VERSION = "1.8.0"
-
-
-def build_reality_vless_inbound_payload(
-    *,
-    sni: str,
-    private_key: str,
-    public_key: str,
-    short_id: str,
-    remark: str,
-    port: int = REALITY_PORT,
-) -> dict:
-    settings = {
-        "clients": [],
-        "decryption": "none",
-        "fallbacks": [],
-    }
-    stream_settings = {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-            "show": False,
-            "dest": f"{sni}:443",
-            "xver": 0,
-            "serverNames": [sni],
-            "privateKey": private_key,
-            "minClientVer": MIN_CLIENT_VERSION,
-            "shortIds": [short_id],
-            "settings": {
-                # xray-core itself derives the public key from privateKey and
-                # never reads this. 3x-ui does: its own share-link generator
-                # (internal/sub/service.go, applyShareRealityParams) reads pbk
-                # from realitySettings.settings.publicKey and from nowhere
-                # else. Left empty -- as it was -- every link the panel
-                # produces for this inbound, including the QR code in its UI
-                # and GET /panel/api/clients/links/{email}, comes out with an
-                # empty pbk= and cannot connect.
-                "publicKey": public_key,
-                "fingerprint": "chrome",
-                "spiderX": "/",
-            },
-        },
-        "tcpSettings": {"header": {"type": "none"}},
-    }
-    sniffing = {
-        "enabled": True,
-        "destOverride": ["http", "tls", "quic"],
-    }
-
-    return {
-        "up": 0,
-        "down": 0,
-        "total": 0,
-        "remark": remark,
-        "enable": True,
-        "expiryTime": 0,
-        "listen": "",
-        "port": port,
-        "protocol": "vless",
-        "settings": json.dumps(settings),
-        "streamSettings": json.dumps(stream_settings),
-        "sniffing": json.dumps(sniffing),
-    }

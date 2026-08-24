@@ -1,11 +1,10 @@
 """Generates X25519 keypairs and short IDs for REALITY inbounds.
 
-We generate these ourselves instead of asking 3x-ui for them (its panel UI
-has a "get new x25519 cert" button, but going through the API to fetch a
-generated pair is an extra round trip and one more thing to guess the
-response shape of). The encoding below -- raw 32-byte key, base64url,
-padding stripped -- matches what `xray x25519` itself outputs and what
-xray-core expects in `realitySettings.privateKey`.
+We generate these ourselves rather than asking the panel for a pair: it is
+one fewer round trip, and one fewer response shape to depend on. The
+encoding below -- raw 32-byte key, base64url, padding stripped -- matches
+what `xray x25519` itself outputs and what xray-core expects in
+`realitySettings.privateKey`.
 """
 
 from __future__ import annotations
