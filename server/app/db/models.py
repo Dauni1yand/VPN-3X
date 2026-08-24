@@ -68,24 +68,40 @@ class User(Base):
 
 
 class Node(Base):
-    """A VPN node running 3x-ui. Panel credentials are stored encrypted;
-    the main server logs into the panel (session cookie), it does not rely
-    on a per-node API token — see PLAN.md section 4."""
+    """A VPS serving VPN traffic, as we track it.
+
+    The node itself is owned by the Remnawave panel: it runs the
+    remnawave-node container and the panel pushes its Xray config. This row
+    is our side of it -- the balancer's inputs (country, status, failure
+    count), and the handles needed to address the node in the panel.
+
+    Each node gets its own config profile AND its own internal squad. The
+    squad is what preserves a property Remnawave does not have natively:
+    the server, not the user, decides which node a config lands on. A user
+    placed in exactly one node's squad can only reach that node.
+    """
 
     __tablename__ = "nodes"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255))
     ip: Mapped[str] = mapped_column(String(64))
-    panel_base_url: Mapped[str] = mapped_column(String(255))
-    panel_login: Mapped[str] = mapped_column(String(255))
-    panel_password_encrypted: Mapped[str] = mapped_column(Text)
-    # 3x-ui API token (Settings -> API Tokens; the installer mints one at
-    # "install" scope = admin and writes it to /etc/x-ui/install-result.env).
-    # Preferred over the login/password session: a Bearer token sets
-    # `api_authed` in the panel, which bypasses its CSRF middleware entirely.
-    # Nullable because nodes connected manually via /nodes may only have
-    # login/password -- threexui_client falls back to a session for those.
+    # --- Remnawave handles ----------------------------------------------
+    # Nullable so a row exists from the moment the admin adds the node,
+    # before the worker has registered it with the panel -- and so rows
+    # predating the migration off 3x-ui still load.
+    remnawave_node_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    config_profile_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    internal_squad_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    # --- legacy 3x-ui credentials ----------------------------------------
+    # Dead for Remnawave nodes: there is one panel for the deployment now,
+    # not one per VPS. Kept nullable rather than dropped so rows created
+    # under 3x-ui remain readable, which is what makes the migration
+    # reversible.
+    panel_base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    panel_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    panel_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     panel_api_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     sni: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # ISO-3166 alpha-2 (e.g. "NL", "DE") set by the admin when the node is
@@ -103,14 +119,25 @@ class Node(Base):
 
 
 class Inbound(Base):
-    """Mirrors an inbound created on a node's 3x-ui panel. Clients are added
-    to an existing inbound, never as new inbounds (README requirement)."""
+    """The REALITY inbound a node serves, as we track it.
+
+    In Remnawave the inbound lives inside a config profile's Xray config
+    rather than on the node, and is addressed by UUID. We still keep our own
+    row for it: the REALITY keypair, shortId, SNI and port are what every
+    issued config depends on, and the doctor's whole job is diffing the
+    panel's copy against ours.
+    """
 
     __tablename__ = "inbounds"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"))
-    remote_inbound_id: Mapped[int] = mapped_column()  # inbound id as known by 3x-ui
+    # The inbound's UUID inside the config profile, which is how Remnawave
+    # addresses it -- in node activeInbounds and in squad membership alike.
+    remnawave_inbound_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Legacy: 3x-ui numbered its inbounds. Nullable so rows created under
+    # Remnawave do not have to invent one.
+    remote_inbound_id: Mapped[int | None] = mapped_column(nullable=True)
     protocol: Mapped[str] = mapped_column(String(32), default="vless")
     transport: Mapped[str] = mapped_column(String(16), default="tcp")  # tcp (reality) or grpc
     port: Mapped[int] = mapped_column()
@@ -128,15 +155,33 @@ class Inbound(Base):
 
 
 class Client(Base):
-    """A single VLESS client added to an existing inbound on a node."""
+    """One user's access to one node, as we track it.
+
+    Backed by a Remnawave *user*. Remnawave models a person, not a per-node
+    credential: a user's reach is the union of their squads, and they get
+    one subscription covering all of it. We put each user in exactly one
+    node's squad, which is what keeps "the server picks the node" true and
+    keeps this row meaning what it always meant.
+    """
 
     __tablename__ = "clients"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     inbound_id: Mapped[str] = mapped_column(ForeignKey("inbounds.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    remote_client_uuid: Mapped[str] = mapped_column(String(36))  # UUID known by 3x-ui
-    email: Mapped[str] = mapped_column(String(255), unique=True)  # 3x-ui client identifier
+    # The VLESS UUID that appears in the share link. Remnawave mints it as
+    # the user's vlessUuid; we do not choose it any more.
+    remote_client_uuid: Mapped[str] = mapped_column(String(36))
+    # The panel's username for this client. Ours are "<telegram_id>-<8 hex>",
+    # which fits Remnawave's ^[a-zA-Z0-9_-]{3,36}$ and stays unique.
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    # --- Remnawave handles ------------------------------------------------
+    remnawave_user_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    remnawave_short_uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The panel's subscription link. Handed out alongside the raw config: a
+    # subscription keeps working when the node's parameters change, which a
+    # pasted vless:// URI cannot.
+    subscription_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[ClientStatus] = mapped_column(Enum(ClientStatus, name="client_status"), default=ClientStatus.active)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # The share link exactly as the node's own 3x-ui generated it at issuance
