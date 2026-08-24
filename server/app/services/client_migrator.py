@@ -14,6 +14,7 @@ import uuid
 
 from app.db.models import Client, Inbound, Node
 from app.services.threexui_client import get_pooled_client
+from app.services.vless import resolve_vless_uri
 
 
 async def migrate_client(
@@ -50,3 +51,9 @@ async def migrate_client(
     client.inbound_id = target_inbound.id
     client.remote_client_uuid = new_uuid
     client.email = new_email
+    # The stored link points at the node we just moved off, so it has to be
+    # re-issued from the target rather than left to go stale -- "Мой конфиг"
+    # serves this string directly.
+    client.vless_uri = await resolve_vless_uri(
+        target_node, target_inbound, new_uuid, email=new_email, remark="vpn-3x"
+    )

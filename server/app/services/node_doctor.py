@@ -38,6 +38,20 @@ def _as_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _same_link(left: str, right: str) -> bool:
+    """Whether two share links describe the same connection.
+
+    Compares everything but the `#fragment`: that is the display name, which
+    we override on issuance and the panel regenerates from a template
+    carrying live traffic and expiry figures, so it differs on every call
+    without anything having drifted. Everything before it is stable: the
+    panel sorts query parameters, and it picks sni/sid at random only when
+    serverNames/shortIds hold more than one entry, which ours never do.
+    """
+
+    return left.split("#", 1)[0] == right.split("#", 1)[0]
+
+
 async def diagnose_node(db: AsyncSession, node: Node) -> dict:
     report: dict[str, Any] = {"node_id": node.id, "name": node.name, "ip": node.ip}
     problems: list[str] = []
@@ -118,6 +132,20 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
             "Рукопожатие будет отвергнуто, и клиент уйдёт на dest."
         )
 
+    # 3x-ui's own link generator reads pbk from realitySettings.settings.
+    # publicKey. Inbounds we created before that field was filled in still
+    # have it blank, which makes every link the panel produces for them --
+    # its QR code included -- unusable, even though xray itself is fine.
+    reality_settings = _as_dict(reality.get("settings"))
+    report["inbound"]["publicKeyForLinks"] = bool(reality_settings.get("publicKey"))
+    if not reality_settings.get("publicKey"):
+        problems.append(
+            "В realitySettings.settings.publicKey на ноде пусто: панель 3x-ui "
+            "выдаёт ссылки с пустым pbk=. Наши конфиги собираются локально и "
+            "работают, но ссылка/QR из самой панели — нет. Лечится "
+            "переустановкой инбаунда."
+        )
+
     min_ver = reality.get("minClientVer")
     if not min_ver:
         problems.append(
@@ -158,6 +186,38 @@ async def diagnose_node(db: AsyncSession, node: Node) -> dict:
         problems.append(
             f"{len(missing)} из {len(our_clients)} выданных клиентов нет на ноде — "
             "их конфиги подключатся и не будут передавать трафик."
+        )
+
+    # --- does the node still generate the links we handed out -------------
+    #
+    # The strongest check available, and the reason issuance asks the node
+    # for the link in the first place: the panel generates it from the same
+    # inbound row xray is configured from, so regenerating it now and
+    # comparing against the string the user actually holds catches every
+    # drift class at once -- rotated keys, a changed SNI or shortId, a
+    # re-created inbound -- without having to enumerate them.
+    stale: list[str] = []
+    unavailable = 0
+
+    for ours_client in our_clients:
+        if not ours_client.vless_uri:
+            continue
+        try:
+            live = await client.get_client_links(ours_client.email)
+        except Exception:  # noqa: BLE001 -- absence of an answer is not drift
+            unavailable += 1
+            continue
+        if not any(_same_link(link, ours_client.vless_uri) for link in live):
+            stale.append(ours_client.email)
+
+    report["links"] = {"checked": len(our_clients), "stale": len(stale), "unavailable": unavailable}
+
+    if stale:
+        problems.append(
+            f"У {len(stale)} клиентов выданная ссылка больше не совпадает с той, "
+            f"которую нода генерирует сейчас ({', '.join(stale[:3])}"
+            f"{'...' if len(stale) > 3 else ''}). Эти конфиги подключатся и не "
+            "будут передавать трафик."
         )
 
     # --- has anyone actually connected ------------------------------------

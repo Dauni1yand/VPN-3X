@@ -294,6 +294,51 @@ class ThreeXUIClient:
 
         return self._body(response)
 
+    async def get_client_links(
+        self,
+        email: str,
+    ) -> list[str]:
+        """The share links the node itself generates for this client.
+
+        This is the panel's own generator (internal/sub/service.go,
+        genVlessLink), reading the same inbound row xray is configured from,
+        so a link it returns cannot disagree with what the node actually
+        serves. That is the whole reason to prefer it over composing the URI
+        here from our own copy of the parameters.
+
+        The address in the link comes from the Host header of this request
+        (controller.resolveHost), so it is whatever host we dialled the panel
+        on -- the node's public IP, since panel_base_url is built from it.
+        """
+
+        response = await self._request(
+            "GET",
+            f"/panel/api/clients/links/{email}",
+        )
+
+        obj = self._body(response).get("obj") or []
+
+        return [str(link) for link in obj if isinstance(link, str)] if isinstance(obj, list) else []
+
+    async def get_inbound(
+        self,
+        inbound_id: int,
+    ) -> dict:
+
+        response = await self._request(
+            "GET",
+            f"/panel/api/inbounds/get/{inbound_id}",
+        )
+
+        obj = self._body(response).get("obj")
+
+        if not isinstance(obj, dict):
+            raise ThreeXUIAPIError(
+                f"3x-ui returned no inbound #{inbound_id}: {obj!r}"
+            )
+
+        return obj
+
     async def delete_client(
         self,
         email: str,

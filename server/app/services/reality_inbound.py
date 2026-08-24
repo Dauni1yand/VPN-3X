@@ -39,7 +39,13 @@ MIN_CLIENT_VERSION = "1.8.0"
 
 
 def build_reality_vless_inbound_payload(
-    *, sni: str, private_key: str, short_id: str, remark: str, port: int = REALITY_PORT
+    *,
+    sni: str,
+    private_key: str,
+    public_key: str,
+    short_id: str,
+    remark: str,
+    port: int = REALITY_PORT,
 ) -> dict:
     settings = {
         "clients": [],
@@ -58,7 +64,15 @@ def build_reality_vless_inbound_payload(
             "minClientVer": MIN_CLIENT_VERSION,
             "shortIds": [short_id],
             "settings": {
-                "publicKey": "",  # server side does not need its own public key
+                # xray-core itself derives the public key from privateKey and
+                # never reads this. 3x-ui does: its own share-link generator
+                # (internal/sub/service.go, applyShareRealityParams) reads pbk
+                # from realitySettings.settings.publicKey and from nowhere
+                # else. Left empty -- as it was -- every link the panel
+                # produces for this inbound, including the QR code in its UI
+                # and GET /panel/api/clients/links/{email}, comes out with an
+                # empty pbk= and cannot connect.
+                "publicKey": public_key,
                 "fingerprint": "chrome",
                 "spiderX": "/",
             },

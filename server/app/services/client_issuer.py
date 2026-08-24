@@ -10,7 +10,7 @@ from app.schemas.clients import ClientOut
 from app.services.node_balancer import pick_node_for_client
 from app.services.threexui_client import get_pooled_client
 from app.services.users import get_or_create_user
-from app.services.vless import build_vless_uri
+from app.services.vless import resolve_vless_uri
 
 
 async def issue_client(
@@ -88,6 +88,17 @@ async def issue_client(
     },
 )
 
+    # Asked for after the client exists on the node, because that is what the
+    # panel generates the link from. Nothing new can fail here that has not
+    # already failed above -- add_client had to reach the same panel.
+    vless_uri = await resolve_vless_uri(
+        node,
+        inbound,
+        client_uuid,
+        email=email,
+        remark="vpn-3x",
+)
+
     client = Client(
         inbound_id=inbound.id,
         user_id=user.id,
@@ -95,18 +106,12 @@ async def issue_client(
         email=email,
         status=ClientStatus.active,
         expires_at=expires_at,
+        vless_uri=vless_uri,
 )
 
     db.add(client)
 
     await db.flush()
-
-    vless_uri = build_vless_uri(
-        node,
-        inbound,
-        client_uuid,
-        remark="vpn-3x",
-)
 
     return ClientOut(
         id=client.id,

@@ -139,6 +139,13 @@ class Client(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)  # 3x-ui client identifier
     status: Mapped[ClientStatus] = mapped_column(Enum(ClientStatus, name="client_status"), default=ClientStatus.active)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # The share link exactly as the node's own 3x-ui generated it at issuance
+    # (services/vless.py). Stored so "Мой конфиг" hands back the same string
+    # we already gave the user without another round trip to the node, and so
+    # the doctor can diff it against what the node generates today. Nullable:
+    # rows issued before this existed, and any issuance that had to fall back
+    # to composing the URI locally, have none.
+    vless_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

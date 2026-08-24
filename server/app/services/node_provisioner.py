@@ -33,8 +33,8 @@ class InboundPortInUseError(RuntimeError):
     """The target port is held by an inbound that has users on it."""
 
 
-def _client_count(inbound: dict) -> int:
-    """How many clients an inbound from /panel/api/inbounds/list carries.
+def _clients_of(inbound: dict) -> list:
+    """The client list of an inbound as the panel reports it.
 
     `settings` normally comes back as a nested object (Inbound.MarshalJSON
     expands it on the way out) but falls back to a JSON string when the
@@ -47,14 +47,30 @@ def _client_count(inbound: dict) -> int:
         try:
             settings = json.loads(settings)
         except ValueError:
-            return 0
+            return []
 
     if not isinstance(settings, dict):
-        return 0
+        return []
 
     clients = settings.get("clients")
 
-    return len(clients) if isinstance(clients, list) else 0
+    return clients if isinstance(clients, list) else []
+
+
+def _client_count(inbound: dict) -> int:
+    return len(_clients_of(inbound))
+
+
+def _settings_with_clients(settings: str, clients: list) -> str:
+    """Puts `clients` into a JSON-encoded `settings` string.
+
+    The inbound API takes settings as a string, so swapping one field means
+    decoding and re-encoding rather than mutating a dict.
+    """
+
+    decoded = json.loads(settings)
+    decoded["clients"] = clients
+    return json.dumps(decoded)
 
 
 async def provision_default_inbound(
@@ -95,6 +111,7 @@ async def provision_default_inbound(
         build_reality_vless_inbound_payload(
             sni=sni,
             private_key=private_key,
+            public_key=public_key,
             short_id=short_id,
             remark=f"vpn-3x-{node.name}",
         )
@@ -197,6 +214,7 @@ async def rotate_inbound_sni(
         build_reality_vless_inbound_payload(
             sni=new_sni,
             private_key=private_key,
+            public_key=inbound.reality_public_key,
             short_id=inbound.reality_short_id,
             remark=f"vpn-3x-{node.name}",
             port=inbound.port,
@@ -204,6 +222,17 @@ async def rotate_inbound_sni(
     )
 
     threexui = get_pooled_client(node)
+
+    # 3x-ui's update writes `settings` through verbatim, so posting the
+    # freshly built payload as-is would replace the client list with the
+    # empty one the builder starts from -- silently deleting every user on
+    # the inbound. Rotating the SNI is supposed to leave them in place (only
+    # the dest changes; the keypair and shortId are reused above precisely so
+    # existing configs keep working), so carry the node's current clients over.
+    current = await threexui.get_inbound(inbound.remote_inbound_id)
+    payload["settings"] = _settings_with_clients(
+        payload["settings"], _clients_of(current)
+    )
 
     await threexui.update_inbound(
         inbound.remote_inbound_id,

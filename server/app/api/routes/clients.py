@@ -85,7 +85,14 @@ async def get_user_client(telegram_id: int, db: AsyncSession = Depends(get_db)) 
         id=client.id,
         status=client.status,
         expires_at=client.expires_at,
-        vless_uri=build_vless_uri(node, inbound, client.remote_client_uuid, remark="vpn-3x"),
+        # The link the node generated when this client was issued. Handing
+        # back the stored string keeps this endpoint a single DB read -- the
+        # bot calls it on every "Мой конфиг" tap -- and guarantees the user
+        # sees the same config they were given rather than a fresh
+        # composition of it. Rows predating the column fall back to composing
+        # it from the inbound, which is what they were issued with anyway.
+        vless_uri=client.vless_uri
+        or build_vless_uri(node, inbound, client.remote_client_uuid, remark="vpn-3x"),
     )
 
 
@@ -155,5 +162,7 @@ async def migrate_client_route(
     await db.commit()
     await db.refresh(client)
 
-    vless_uri = build_vless_uri(target_node, target_inbound, client.remote_client_uuid, remark="vpn-3x")
+    vless_uri = client.vless_uri or build_vless_uri(
+        target_node, target_inbound, client.remote_client_uuid, remark="vpn-3x"
+    )
     return ClientOut(id=client.id, status=client.status, expires_at=client.expires_at, vless_uri=vless_uri)
