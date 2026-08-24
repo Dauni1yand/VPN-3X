@@ -71,8 +71,8 @@ echo "== Диагностика ноды $NODE_ID =="
 api "/nodes/$NODE_ID/diagnose"
 
 echo
-echo "== Лог xray-core на ноде =="
-# A rejected REALITY handshake shows up here and nowhere else -- the node
-# answers it by proxying to `dest` rather than by an error, so the client
-# sees a completed handshake either way.
-api "/nodes/$NODE_ID/xray-log?count=80"
+echo "== Состояние ноды в панели =="
+# Remnawave's API does not expose the node's xray log -- it lives in the
+# node's own container. The endpoint returns the panel's view and the exact
+# command for the log itself.
+api "/nodes/$NODE_ID/xray-log"

@@ -10,6 +10,7 @@ happens to sit, are properties of managing a VPS over SSH.
 from __future__ import annotations
 
 import asyncio
+import shlex
 
 import asyncssh
 
@@ -17,6 +18,16 @@ import asyncssh
 COMMAND_TIMEOUT_SECONDS = 900
 CONNECT_TIMEOUT_SECONDS = 20
 LOGIN_TIMEOUT_SECONDS = 60
+
+
+SNI_CANDIDATES = (
+    "www.microsoft.com",
+    "www.apple.com",
+    "dl.google.com",
+    "www.cloudflare.com",
+    "aws.amazon.com",
+    "www.swift.org",
+)
 
 
 NONINTERACTIVE = (

@@ -8,9 +8,13 @@ from app.db.models import NodeStatus
 class NodeCreate(BaseModel):
     name: str
     ip: str
-    panel_base_url: str
-    panel_login: str
-    panel_password: str = Field(repr=False)
+    # Legacy 3x-ui panel fields. Optional now: a Remnawave node has no panel
+    # of its own, so a node can be recorded with nothing but a name and an
+    # address. Still accepted so rows imported from a 3x-ui deployment keep
+    # their credentials.
+    panel_base_url: str | None = None
+    panel_login: str | None = None
+    panel_password: str | None = Field(default=None, repr=False)
     # ISO-3166 alpha-2, e.g. "NL" -- used by the balancer as a coarse latency
     # proxy when the caller has no measured RTT (see node_balancer.py).
     country: str | None = None
@@ -38,7 +42,10 @@ class NodeOut(BaseModel):
     id: str
     name: str
     ip: str
-    panel_base_url: str
+    # None for every node created under Remnawave -- there is no per-node
+    # panel to have a URL for.
+    panel_base_url: str | None = None
+    remnawave_node_uuid: str | None = None
     sni: str | None
     country: str | None
     status: NodeStatus
