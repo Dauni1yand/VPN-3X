@@ -6,13 +6,15 @@ import logging
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.security import decrypt_secret, encrypt_secret
 
 from app.db.models import (
     Alert,
     AlertStatus,
+    Client,
+    ClientStatus,
     Inbound,
     Node,
     NodeStatus,
@@ -209,6 +211,59 @@ async def _update_xray_to_latest(client, node_id: str) -> str | None:
     return latest
 
 
+async def _retire_superseded_nodes(db, node) -> list[str]:
+    """Retires older Node rows that claim the same IP as `node`.
+
+    One box cannot serve two nodes: bootstrapping replaces its 3x-ui, its
+    REALITY keypair and its inbound, so every older row pointing at that IP
+    is describing something that no longer exists. Left alone those rows
+    stay `active` and keep being chosen -- and their clients keep being
+    handed out as working configs, because a REALITY handshake the node no
+    longer recognises is answered by proxying to `dest` rather than by an
+    error. The user gets a config that connects, pings, and carries no
+    traffic.
+
+    Their clients are revoked for the same reason: the keys those configs
+    encode are gone, so the config is dead whatever our table says.
+    """
+
+    superseded = (
+        await db.execute(
+            select(Node).where(Node.ip == node.ip, Node.id != node.id)
+        )
+    ).scalars().all()
+
+    if not superseded:
+        return []
+
+    old_ids = [old.id for old in superseded]
+
+    inbound_ids = list(
+        (
+            await db.execute(select(Inbound.id).where(Inbound.node_id.in_(old_ids)))
+        ).scalars()
+    )
+
+    if inbound_ids:
+        await db.execute(
+            update(Client)
+            .where(
+                Client.inbound_id.in_(inbound_ids),
+                Client.status == ClientStatus.active,
+            )
+            .values(status=ClientStatus.revoked)
+        )
+
+    for old in superseded:
+        old.status = NodeStatus.disabled
+
+    logger.info(
+        "node %s superseded %d older node(s) on %s", node.id, len(old_ids), node.ip
+    )
+
+    return old_ids
+
+
 async def bootstrap_node_job(
     ctx,
     node_id: str,
@@ -301,6 +356,8 @@ async def bootstrap_node_job(
             node.status = NodeStatus.active
             node.consecutive_failures = 0
 
+            retired = await _retire_superseded_nodes(db, node)
+
             await db.commit()
 
         except Exception as exc:
@@ -347,6 +404,16 @@ async def bootstrap_node_job(
             else "xray-core: не обновился, осталась версия из сборки 3x-ui"
         )
 
+        # Say it plainly: the old configs on that IP are dead, and a user
+        # who still holds one gets a connection that pings and carries
+        # nothing. They need to be re-issued, not debugged.
+        retired_line = (
+            f"\n\n♻️ Заменила {len(retired)} прежнюю ноду на этом IP — "
+            "её конфиги больше не работают, выдайте пользователям новые."
+            if retired
+            else ""
+        )
+
         await notify_admins(
             f"✅ Нода «{node.name}» "
             f"({node.ip}) полностью готова.\n\n"
@@ -354,4 +421,5 @@ async def bootstrap_node_job(
             f"{xray_line}\n"
             f"SNI: {inbound.sni}\n"
             f"VPN: VLESS + REALITY / TCP / 443"
+            f"{retired_line}"
         )

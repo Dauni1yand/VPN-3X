@@ -63,6 +63,12 @@ async def get_user_client(telegram_id: int, db: AsyncSession = Depends(get_db)) 
                 User.telegram_id == telegram_id,
                 Client.status == ClientStatus.active,
                 Client.expires_at > now,
+                # The node has to actually be able to serve it. A client on
+                # a retired node is a config that connects and carries no
+                # traffic -- REALITY answers the handshake and proxies it to
+                # `dest` -- so handing it back looks like a working config
+                # and is worse than saying there is none.
+                Node.status == NodeStatus.active,
             )
             # Longest-lived first: a user who topped up while still having
             # time left has more than one live client, and the one that
