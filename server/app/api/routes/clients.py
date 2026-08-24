@@ -93,6 +93,7 @@ async def get_user_client(telegram_id: int, db: AsyncSession = Depends(get_db)) 
         # it from the inbound, which is what they were issued with anyway.
         vless_uri=client.vless_uri
         or build_vless_uri(node, inbound, client.remote_client_uuid, remark="vpn-3x"),
+        subscription_url=client.subscription_url,
     )
 
 
@@ -165,4 +166,10 @@ async def migrate_client_route(
     vless_uri = client.vless_uri or build_vless_uri(
         target_node, target_inbound, client.remote_client_uuid, remark="vpn-3x"
     )
-    return ClientOut(id=client.id, status=client.status, expires_at=client.expires_at, vless_uri=vless_uri)
+    return ClientOut(
+        id=client.id,
+        status=client.status,
+        expires_at=client.expires_at,
+        vless_uri=vless_uri,
+        subscription_url=client.subscription_url,
+    )

@@ -36,6 +36,12 @@ class ClientOut(BaseModel):
     status: ClientStatus
     expires_at: datetime
     vless_uri: str
+    # Remnawave's subscription link for this client. Worth handing out
+    # alongside the raw URI rather than instead of it: a subscription keeps
+    # working when the node's parameters change, which a pasted vless:// URI
+    # cannot, but not every client app takes one. Optional because rows
+    # issued under 3x-ui have no subscription behind them.
+    subscription_url: str | None = None
 
     class Config:
         from_attributes = True

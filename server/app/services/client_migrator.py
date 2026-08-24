@@ -3,57 +3,57 @@
 maintenance or once it's flagged unstable, without cutting the user's
 remaining VPN time short.
 
-Issues a fresh client on the target inbound for the SAME remaining expiry
-first, and only then deletes the old one -- in that order, so a failure
-deleting the old client (the node might already be half-dead, which is
-often *why* we're migrating off it) never leaves the user without access."""
+Under 3x-ui this meant creating a client on the target node, then deleting
+the one on the source, in that order so a failure on a half-dead source
+node never left the user without access.
+
+Under Remnawave it is one call. A user's reach is their squad membership,
+so moving them between nodes is swapping which squad they are in -- the
+same user, the same subscription, the same remaining expiry. There is no
+window where they hold two credentials or none, which is what the careful
+ordering used to be defending against.
+"""
 
 from __future__ import annotations
 
-import uuid
-
 from app.db.models import Client, Inbound, Node
-from app.services.threexui_client import get_pooled_client
-from app.services.vless import resolve_vless_uri
+from app.services.remnawave_client import RemnawaveError, get_remnawave
+from app.services.vless import pick_reality_link
 
 
 async def migrate_client(
     client: Client,
     old_inbound: Inbound,  # noqa: ARG001 -- kept for call-site symmetry with the target side
-    old_node: Node,
+    old_node: Node,  # noqa: ARG001 -- the swap is expressed as the new squad, not a removal
     target_inbound: Inbound,
     target_node: Node,
 ) -> None:
-    new_uuid = str(uuid.uuid4())
-    new_email = f"{client.email.rsplit('-', 1)[0]}-{new_uuid[:8]}"
+    if not client.remnawave_user_uuid:
+        raise RemnawaveError(
+            "у клиента нет пользователя в панели Remnawave — "
+            "он выдан ещё под 3x-ui, выдайте конфиг заново"
+        )
 
-    target_threexui = get_pooled_client(target_node)
-    await target_threexui.add_client(
-        inbound_id=target_inbound.remote_inbound_id,
-        client={
-            "id": new_uuid,
-            "email": new_email,
-            "flow": "xtls-rprx-vision",
-            "expiryTime": int(client.expires_at.timestamp() * 1000),
-            "enable": True,
-        },
+    if not target_node.internal_squad_uuid:
+        raise RemnawaveError("у целевой ноды нет internal squad в панели")
+
+    panel = get_remnawave()
+
+    await panel.update_user(
+        client.remnawave_user_uuid,
+        activeInternalSquads=[target_node.internal_squad_uuid],
     )
 
-    old_threexui = get_pooled_client(old_node)
-    try:
-        await old_threexui.delete_client(client.email)
-    except Exception:  # noqa: BLE001 -- best-effort cleanup; the new client is already
-        # active on the target node by this point, so a stale leftover on a
-        # node we're migrating away from (often because it's unhealthy) must
-        # not fail the migration itself.
-        pass
-
     client.inbound_id = target_inbound.id
-    client.remote_client_uuid = new_uuid
-    client.email = new_email
+
     # The stored link points at the node we just moved off, so it has to be
-    # re-issued from the target rather than left to go stale -- "Мой конфиг"
+    # re-read from the panel rather than left to go stale -- "Мой конфиг"
     # serves this string directly.
-    client.vless_uri = await resolve_vless_uri(
-        target_node, target_inbound, new_uuid, email=new_email, remark="vpn-3x"
+    client.vless_uri = await pick_reality_link(
+        panel,
+        client.remnawave_short_uuid or "",
+        target_node,
+        target_inbound,
+        client.remote_client_uuid,
+        remark="vpn-3x",
     )
